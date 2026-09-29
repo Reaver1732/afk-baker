@@ -7,7 +7,7 @@
 	'use strict';
 
 	const MOD_ID = 'afk baker';
-	const VERSION = '1.3.0';
+	const VERSION = '1.4.0';
 	// Settings saved before a default changed are reset to the new default:
 	// v1 had auto-ascend on, v2 had Elder Pledge on, v3 had the Auto reserve.
 	const SETTINGS_VERSION = 4;
@@ -56,6 +56,10 @@
 	const SKIP_UNBUYABLE_MS = 60000;
 	const STALE_PRICE_SKIP_MS = 5000;
 	const DEBUG_TOP_CANDIDATES = 5;
+	// How long the autoclicker's landed clicks are counted to measure its real click rate.
+	const CLICK_RATE_WINDOW_MS = 10000;
+	// Object.buy and Upgrade.buy play one of snd/buy1.mp3 to snd/buy4.mp3.
+	const BUY_SOUND = /^snd\/buy\d\.mp3$/;
 	const REINCARNATE_GRACE_MS = 3000;
 	const STATUS_REFRESH_MS = 500;
 
@@ -69,6 +73,7 @@
 		clickFortunes: true,
 		fortuneMode: 'all',
 		autoBuy: true,
+		muteBuySounds: true,
 		reserveMode: 'off',
 		autoReserveMinutes: 30,
 		buyResearch: true,
@@ -112,6 +117,9 @@
 	const state = {
 		lastClickTime: 0,
 		owedClicks: 0,
+		clickWindowStart: 0,
+		clickWindowClicks: 0,
+		measuredClickRate: null, // clicks per second that actually landed, once measured
 		nextBuyAt: 0,
 		buyResumeAt: 0,
 		buyStatus: 'Starting up.',
@@ -182,6 +190,7 @@
 			if (isAscending()) {
 				state.owedClicks = 0;
 				state.lastClickTime = 0;
+				state.clickWindowStart = 0;
 				return;
 			}
 			const s = settings();
@@ -218,24 +227,53 @@
 	   CLICKERS
 	   ===================================================================== */
 
+	// Counts the autoclicker's landed clicks over a window to measure its real click rate.
+	function measureClickRate(now, landed) {
+		if (!state.clickWindowStart) {
+			state.clickWindowStart = now;
+			state.clickWindowClicks = 0;
+		}
+		state.clickWindowClicks += landed;
+		const elapsed = now - state.clickWindowStart;
+		if (elapsed < CLICK_RATE_WINDOW_MS) return;
+		state.measuredClickRate = state.clickWindowClicks / (elapsed / 1000);
+		state.clickWindowStart = now;
+		state.clickWindowClicks = 0;
+	}
+
+	// Clicks per second the autoclicker really lands. The setting is already capped at the game's
+	// 50 per second, but clicks are lost while the game is starting up, or when a throttled window
+	// falls more than the 5-second catch-up behind.
+	function effectiveClickRate() {
+		const rate = settings().clickRate;
+		if (rate <= 0) return 0;
+		return state.measuredClickRate === null ? rate : Math.min(rate, state.measuredClickRate);
+	}
+
 	function clickBigCookie(now) {
 		const rate = settings().clickRate;
 		if (rate <= 0 || !state.lastClickTime) {
 			state.owedClicks = 0;
 			state.lastClickTime = now;
+			state.clickWindowStart = 0;
 			return;
 		}
 		// Clicks are owed by wall-clock time, so a throttled (minimized) window still gets the
 		// configured rate. Capped at 5 seconds, matching the game's own catch-up limit.
 		state.owedClicks = Math.min(state.owedClicks + (now - state.lastClickTime) / 1000 * rate, rate * 5);
 		state.lastClickTime = now;
-		if (state.owedClicks < 1) return;
+		if (state.owedClicks < 1) {
+			measureClickRate(now, 0);
+			return;
+		}
 
 		const clicks = Math.floor(state.owedClicks);
 		const clicksBefore = Game.cookieClicks;
 		// ClickCookie accepts one click per 20 ms. Several owed clicks become one click worth that many.
 		Game.ClickCookie(0, clicks > 1 ? Game.computedMouseCps * clicks : 0);
-		if (Game.cookieClicks === clicksBefore) return;
+		const landed = Game.cookieClicks !== clicksBefore;
+		measureClickRate(now, landed ? clicks : 0);
+		if (!landed) return;
 		state.owedClicks -= clicks;
 		// ClickCookie counted the batch as one click; count the rest (the click hook is not re-run).
 		Game.cookieClicks += clicks - 1;
@@ -392,10 +430,27 @@
 		state.refreshesSinceBuy++;
 	}
 
+	// Runs one of our own purchases with the buy sound suppressed. PlaySound is a global the game looks up
+	// on every call, so swapping it only for the length of this call leaves the player's purchases,
+	// golden cookies and every other sound alone.
+	function withBuySoundMuted(purchase) {
+		if (!settings().muteBuySounds) return purchase();
+		const originalPlaySound = window.PlaySound;
+		window.PlaySound = function (url) {
+			if (typeof url === 'string' && BUY_SOUND.test(url)) return 0;
+			return originalPlaySound.apply(this, arguments);
+		};
+		try {
+			return purchase();
+		} finally {
+			window.PlaySound = originalPlaySound;
+		}
+	}
+
 	function tryBuyUpgrade(upgrade) {
 		if (upgrade.bought || !canAfford(upgrade.getPrice()) || !upgrade.canBuy()) return false;
 		// buy(1) skips confirmation prompts such as the one on "One mind".
-		upgrade.buy(1);
+		withBuySoundMuted(function () { upgrade.buy(1); });
 		const bought = !!upgrade.bought;
 		if (bought) debugLog('Bought upgrade', upgrade.name);
 		return bought;
@@ -409,7 +464,7 @@
 		const savedMode = Game.buyMode;
 		Game.buyMode = 1;
 		try {
-			building.buy(amount);
+			withBuySoundMuted(function () { building.buy(amount); });
 		} finally {
 			Game.buyMode = savedMode;
 		}
@@ -447,9 +502,43 @@
 		return candidate.kind === 'building' ? `${candidate.amount}x ${candidate.name}` : candidate.name;
 	}
 
+	// The product of the temporary click buffs (Click frenzy, Dragonflight...), as Game.mouseCps applies them.
+	function clickBuffMultiplier() {
+		let mult = 1;
+		for (const name in Game.buffs) {
+			if (typeof Game.buffs[name].multClick !== 'undefined') mult *= Game.buffs[name].multClick;
+		}
+		return mult;
+	}
+
+	// Cookies per click the upgrade would add, from calling Game.mouseCps with the upgrade marked as
+	// bought. mouseCps only reads game state, plus the cookiesPerClick mod hook, which Cookie Monster's
+	// own simulation calls as well, so this has no side effects. Temporary click buffs are divided out
+	// so that buying during a Click frenzy doesn't make click upgrades look 777 times better.
+	function clickGainPerClick(upgrade, baseMouseCps) {
+		const wasBought = upgrade.bought;
+		upgrade.bought = 1;
+		let withUpgrade;
+		try {
+			withUpgrade = Game.mouseCps();
+		} finally {
+			upgrade.bought = wasBought;
+		}
+		const buffMult = clickBuffMultiplier();
+		return buffMult > 0 ? (withUpgrade - baseMouseCps) / buffMult : 0;
+	}
+
+	// Cookie Monster's PP formula, with the upgrade's extra click income standing in for extra CpS.
+	function clickPP(price, incomeGain) {
+		const payback = price / incomeGain;
+		return Game.cookiesPs ? Math.max(price - Game.cookies, 0) / Game.cookiesPs + payback : payback;
+	}
+
 	// Every building bundle and upgrade with a useful PP, best first. Upgrades that are never
-	// auto-bought are left out here, before ranking, and listed in `filtered` for the debug dump.
-	function rankCandidates(data, filtered) {
+	// auto-bought are left out here, before ranking, and listed in report.filtered for the debug dump.
+	// Cookie Monster gives upgrades that don't change CpS an infinite PP. While the autoclicker is on,
+	// the ones that raise click income get a click PP instead; the rest go in report.infinite.
+	function rankCandidates(data, report) {
 		const candidates = [];
 		for (const name in Game.Objects) {
 			const building = Game.Objects[name];
@@ -463,17 +552,34 @@
 				});
 			}
 		}
+		const clickRate = effectiveClickRate();
+		const baseMouseCps = clickRate > 0 ? Game.mouseCps() : 0;
 		for (const upgrade of Game.UpgradesInStore) {
 			// Research is handled separately by its own toggle.
 			if (upgrade.pool === 'tech') continue;
 			const reason = upgradeFilterReason(upgrade);
 			if (reason) {
-				filtered.push(`${upgrade.name} (${reason})`);
+				report.filtered.push(`${upgrade.name} (${reason})`);
 				continue;
 			}
 			const entry = data.Upgrades[upgrade.name];
-			if (!entry || !isUsefulPP(entry.pp)) continue;
-			candidates.push({ kind: 'upgrade', name: upgrade.name, amount: 1, pp: entry.pp, price: upgrade.getPrice() });
+			if (!entry) continue;
+			const price = upgrade.getPrice();
+			if (isUsefulPP(entry.pp)) {
+				candidates.push({ kind: 'upgrade', name: upgrade.name, amount: 1, pp: entry.pp, price: price });
+				continue;
+			}
+			if (entry.pp !== Infinity) continue; // <= 0: Cookie Monster says it lowers CpS
+			if (clickRate <= 0) {
+				report.infinite.push(`${upgrade.name} (autoclicker off)`);
+				continue;
+			}
+			const gain = clickGainPerClick(upgrade, baseMouseCps) * clickRate;
+			if (!(gain > 0)) {
+				report.infinite.push(`${upgrade.name} (no click income gain)`);
+				continue;
+			}
+			candidates.push({ kind: 'upgrade', name: upgrade.name, amount: 1, pp: clickPP(price, gain), price: price, tag: 'click' });
 		}
 		candidates.sort(function (a, b) { return a.pp - b.pp; });
 		return candidates;
@@ -507,8 +613,8 @@
 
 	// Picks the lowest-PP candidate that can be bought and buys it, or saves up for it.
 	function buyBestByPP(data, now) {
-		const filtered = [];
-		const candidates = rankCandidates(data, filtered);
+		const report = { filtered: [], infinite: [] };
+		const candidates = rankCandidates(data, report);
 		const skipped = new Map();
 		let chosen = null;
 		for (const candidate of candidates) {
@@ -531,7 +637,7 @@
 			outcome = result.outcome;
 			bought = result.bought;
 		}
-		dumpCandidates(candidates, chosen, outcome, skipped, filtered);
+		dumpCandidates(candidates, chosen, outcome, skipped, report);
 		return bought;
 	}
 
@@ -576,12 +682,12 @@
 			state.buyStatus = `Couldn't buy ${label}, skipping it for now.`;
 			return { outcome: 'buying it failed', bought: false };
 		}
-		state.buyStatus = `Bought ${label} (PP ${Beautify(candidate.pp, 1)}).`;
+		state.buyStatus = `Bought ${label} (${candidate.tag ? candidate.tag + ' ' : ''}PP ${Beautify(candidate.pp, 1)}).`;
 		return { outcome: 'bought', bought: true };
 	}
 
 	// Debug only: the top candidates and what happened to each. Logged when the decisions change.
-	function dumpCandidates(candidates, chosen, outcome, skipped, filtered) {
+	function dumpCandidates(candidates, chosen, outcome, skipped, report) {
 		if (!settings().debug) return;
 		const shown = candidates.slice(0, DEBUG_TOP_CANDIDATES);
 		if (chosen && shown.indexOf(chosen) === -1) shown.push(chosen);
@@ -591,6 +697,7 @@
 			else if (skipped.has(candidate)) decision = `skipped: ${skipped.get(candidate)}`;
 			return {
 				name: candidate.name,
+				tag: candidate.tag || '',
 				amount: candidate.amount,
 				pp: Number(candidate.pp.toPrecision(4)),
 				price: Beautify(candidate.price),
@@ -599,12 +706,13 @@
 		});
 		// Prices and PP change constantly, so only a change of items or decisions triggers a new dump.
 		const signature = rows.map(function (row) { return `${row.name}|${row.amount}|${row.decision}`; }).join(';') +
-			'#' + filtered.join(';');
+			'#' + report.filtered.join(';') + '#' + report.infinite.join(';');
 		if (signature === state.lastDumpSignature) return;
 		state.lastDumpSignature = signature;
 		console.log(`${LOG_PREFIX} Top auto-buy candidates:`);
 		console.table(rows);
-		if (filtered.length) console.log(LOG_PREFIX, 'Filtered out before ranking:', filtered.join(', '));
+		if (report.filtered.length) console.log(LOG_PREFIX, 'Filtered out before ranking:', report.filtered.join(', '));
+		if (report.infinite.length) console.log(LOG_PREFIX, 'Infinite PP, still skipped:', report.infinite.join(', '));
 	}
 
 	function runAutoBuy(now) {
@@ -813,6 +921,8 @@
 
 			heading('Auto-buy') +
 			listing(toggleButton('autoBuy', 'Auto-buy') + note("buys Cookie Monster's lowest-PP upgrade or building (1, 10 or 100 at once), and waits for it rather than buying worse items")) +
+			listing(note('with the autoclicker on, click upgrades such as the mouse upgrades are ranked by the click income they add')) +
+			listing(toggleButton('muteBuySounds', 'Mute auto-buy purchase sounds') + note('only purchases made by AFK Baker; your own purchases still make a sound')) +
 			listing(cycleButton('reserveMode', 'Cookie reserve') + note('Off by default; Lucky = 6,000x unbuffed CpS, Lucky + Frenzy = 42,000x')) +
 			listing(`<label>Auto: no reserve for the first</label> ${numberInput('autoReserveMinutes')}<label>minutes of a run, then Lucky</label>`) +
 			listing(toggleButton('buyResearch', 'Buy research') + note('research upgrades advance the grandmapocalypse')) +

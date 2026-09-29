@@ -25,6 +25,7 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
 **Auto-buy**
 - Picks the item with the lowest payback period (PP) according to Cookie Monster: any upgrade, or 1, 10 or 100 of any building. A bundle of 10 or 100 is bought in one purchase through the game's own bulk buy. The store's Buy/Sell mode and bulk setting are left as you had them. If it can't afford the best item yet, it waits and saves up rather than buying something worse.
 - While it's waiting it checks about once a second. After each purchase it buys again as soon as Cookie Monster has recalculated (about 15 purchases a second when there's a lot to buy), and it never buys twice using the same out-of-date data.
+- **Mute auto-buy purchase sounds** (on by default): AFK Baker's own purchases are silent. Your manual purchases, golden cookies and every other sound play as normal, and the volume isn't changed.
 - If the best item can't be bought at all (the purchase fails, the game refuses it, or Cookie Monster's price for it stays out of date), it skips that item for a minute and moves on to the next best.
 - **Cookie reserve**: how many cookies to keep banked. Lucky and Lucky + Frenzy are the bank sizes needed for a full Lucky payout.
   - **Off** (default): no reserve. Updating from 1.2 or earlier switches the reserve to Off once. After that, your choice is kept.
@@ -47,7 +48,12 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
   - Elder Covenant and Revoke Elder Covenant
 
   To add more upgrades, edit `NEVER_BUY_UPGRADES` at the top of `main.js`.
-- Upgrades with no CpS effect (Cookie Monster gives them an infinite PP) are skipped. Research is the exception and has its own switch.
+- **Click upgrades**: Cookie Monster gives upgrades that only boost clicking (Plastic mouse, Iron mouse and the rest, Halo gloves and so on) an infinite PP, because they don't change CpS. While the autoclicker is on, AFK Baker gives them their own PP:
+  - It asks the game's `Game.mouseCps` how much each click would earn with the upgrade, and multiplies the gain by the clicks per second the autoclicker really lands. It measures the landed rate over 10-second windows, so clicks lost while the window is heavily throttled are counted.
+  - PP = max(price − bank, 0) / CpS + price / click income gain, the same formula Cookie Monster uses, so they rank fairly against buildings and other upgrades.
+  - Temporary click buffs such as Click frenzy are left out, so a frenzy doesn't make them look better than they are.
+  - Upgrades Cookie Monster already gives a finite PP (for example cursor upgrades that also boost Cursors) keep Cookie Monster's number.
+- Other upgrades with no CpS effect (infinite PP) are skipped. Research is the exception and has its own switch.
 - Pauses during ascension, for a few seconds after reincarnating, and whenever Cookie Monster's data is missing or out of date.
 
 **Auto-ascend**
@@ -57,7 +63,7 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
 - **Safety guard**: auto-ascend only fires when you cross the threshold during play. If the threshold is already reached when the mod loads, when you turn auto-ascend on, or when you change the threshold, type or wrinkler mode, the mod shows a warning instead of ascending. To confirm, toggle auto-ascend off and on again.
 
 **Other**
-- **Debug logging**: extra console output. When the auto-buy decision changes, it prints the top 5 candidates (name, amount, PP, price, and why each was chosen or skipped) and the upgrades filtered out before ranking.
+- **Debug logging**: extra console output. When the auto-buy decision changes, it prints the top 5 candidates (name, amount, PP, price, and why each was chosen or skipped; click upgrades are tagged `click`). It also lists the upgrades filtered out before ranking, and any infinite-PP upgrades that are still being skipped.
 
 The Options section also shows a live status line:
 - what auto-buy is doing. When it's waiting, it shows the target, its price, the reserve and how many more cookies are needed, and says which of these it's waiting on:
