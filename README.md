@@ -1,6 +1,6 @@
 # AFK Baker
 
-A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building (1, 10 or 100 at a time) or upgrade according to [Cookie Monster](https://steamcommunity.com/sharedfiles/filedetails/?id=2685721341), and ascends when you reach a prestige goal.
+A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building (1, 10 or 100 at a time) or upgrade according to [Cookie Monster](https://steamcommunity.com/sharedfiles/filedetails/?id=2685721341), harvests and spends sugar lumps, and ascends when you reach a prestige goal.
 
 It uses only the game's built-in mod API (`Game.registerMod`). CCSE is not needed.
 
@@ -25,7 +25,7 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
 **Auto-buy**
 - Picks the item with the lowest payback period (PP) according to Cookie Monster: any upgrade, or 1, 10 or 100 of any building. A bundle of 10 or 100 is bought in one purchase through the game's own bulk buy. The store's Buy/Sell mode and bulk setting are left as you had them. If it can't afford the best item yet, it waits and saves up rather than buying something worse.
 - While it's waiting it checks about once a second. After each purchase it buys again as soon as Cookie Monster has recalculated (about 15 purchases a second when there's a lot to buy), and it never buys twice using the same out-of-date data.
-- **Mute auto-buy purchase sounds** (on by default): AFK Baker's own purchases are silent. Your manual purchases, golden cookies and every other sound play as normal, and the volume isn't changed.
+- **Mute auto-buy purchase sounds** (on by default): AFK Baker's own purchases and building level-ups are silent. Your manual purchases, golden cookies and every other sound play as normal, and the volume isn't changed.
 - If the best item can't be bought at all (the purchase fails, the game refuses it, or Cookie Monster's price for it stays out of date), it skips that item for a minute and moves on to the next best.
 - **Cookie reserve**: how many cookies to keep banked. Lucky and Lucky + Frenzy are the bank sizes needed for a full Lucky payout.
   - **Off** (default): no reserve. Updating from 1.2 or earlier switches the reserve to Off once. After that, your choice is kept.
@@ -56,6 +56,23 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
 - Other upgrades with no CpS effect (infinite PP) are skipped. Research is the exception and has its own switch.
 - Pauses during ascension, for a few seconds after reincarnating, and whenever Cookie Monster's data is missing or out of date.
 
+**Sugar lumps** (nothing happens until sugar lumps are unlocked on your save, at a billion cookies baked in total)
+- **Auto-harvest sugar lumps** (on by default): harvests the current lump as soon as it's **ripe**, never while it's only mature, because a mature harvest has a 50% chance of giving nothing. It uses the game's own ripe time, which already includes your upgrades, Pantheon and dragon aura, and the game's own harvest (`Game.clickLump`).
+  - Every lump type is harvested: normal, bifurcated, golden, meaty and caramelized. A meaty lump can still give 0 to 2 lumps when ripe; that's how the game works.
+  - Harvesting at ripe starts the next lump up to an hour sooner than letting the game drop it.
+  - Paused during a Born again run, where the game hides sugar lumps.
+- **Auto-spend sugar lumps** (off by default): spends lumps on **building levels only**, never on anything else, following a priority list you set.
+  - Each entry is a building and a target level. The mod levels the first entry that isn't at its target yet and never skips ahead to a later entry, even a cheaper one, while an earlier entry is unfinished.
+  - The same building can appear more than once, for example Farm to 1 early and Farm to 9 later.
+  - Levels cost what the game charges: going from level L to L+1 costs L+1 lumps, so level N from 0 costs N×(N+1)/2 in total.
+  - It uses the game's own level-up. If the game's "Lump confirmation" option is on, it's switched off just for the mod's own level-up and put back straight away, so your own spending still asks.
+  - Buildings you don't own yet are levelled too, because levels carry over through ascensions. The status line notes it, e.g. `Leveled Wizard tower to 3 (none owned yet)`.
+  - **Keep at least N lumps** (default 0): the mod never spends below this.
+  - Paused during a Born again run, like harvesting.
+- **Priority list**: shown in the Sugar lumps section as rows with Up, Down and Remove buttons. Use the Add row (a building dropdown and a target level, then Add or Enter) to add entries, and **Reset to default** to start over.
+  - The default list only unlocks the minigames: Farm 1 (Garden), Temple 1 (Pantheon), Wizard tower 1 (Grimoire), Bank 1 (Stock Market). Add anything else yourself.
+  - The list is saved with your other settings. If the saved list is damaged, the default list is used instead.
+
 **Auto-ascend**
 - The threshold is either **prestige gained this run** or **total prestige level after ascending**. It uses the same numbers as the game's Legacy button.
 - When you reach it, the mod ascends. It never reincarnates, so you choose your heavenly upgrades yourself.
@@ -72,6 +89,8 @@ The Options section also shows a live status line:
   - **Waiting on Cookie Monster data**: Cookie Monster isn't loaded, or its numbers are out of date.
 - your current reserve
 - how many wrinklers are feeding, and how many cookies they would pay out
+- sugar lumps owned, the time until the current lump is ripe, and the last harvest
+- the next lump spend and how many lumps it still needs, the lumps needed to finish the whole priority list, and the last level-up, e.g. `Next: Wizard tower to level 3, 2 more lumps needed. 9 lumps to finish the list`
 - your progress toward the ascend threshold, plus the guard warning when it's active
 
 ## Requirements

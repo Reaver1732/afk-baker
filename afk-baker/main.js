@@ -7,7 +7,7 @@
 	'use strict';
 
 	const MOD_ID = 'afk baker';
-	const VERSION = '1.4.0';
+	const VERSION = '1.5.0';
 	// Settings saved before a default changed are reset to the new default:
 	// v1 had auto-ascend on, v2 had Elder Pledge on, v3 had the Auto reserve.
 	const SETTINGS_VERSION = 4;
@@ -58,8 +58,19 @@
 	const DEBUG_TOP_CANDIDATES = 5;
 	// How long the autoclicker's landed clicks are counted to measure its real click rate.
 	const CLICK_RATE_WINDOW_MS = 10000;
-	// Object.buy and Upgrade.buy play one of snd/buy1.mp3 to snd/buy4.mp3.
-	const BUY_SOUND = /^snd\/buy\d\.mp3$/;
+	// Object.buy and Upgrade.buy play one of snd/buy1.mp3 to snd/buy4.mp3; a building level-up plays snd/upgrade.mp3.
+	const PURCHASE_SOUND = /^snd\/(buy\d|upgrade)\.mp3$/;
+	const LUMP_CHECK_INTERVAL_MS = 1000;
+	const MAX_KEEP_LUMPS = 1000000;
+	const MAX_TARGET_LEVEL = 1000;
+	const MAX_PRIORITY_ENTRIES = 100;
+	// Levelling these to 1 unlocks their minigame. Players add anything else themselves.
+	const DEFAULT_LUMP_PRIORITY = [
+		{ building: 'Farm', level: 1 },
+		{ building: 'Temple', level: 1 },
+		{ building: 'Wizard tower', level: 1 },
+		{ building: 'Bank', level: 1 },
+	];
 	const REINCARNATE_GRACE_MS = 3000;
 	const STATUS_REFRESH_MS = 500;
 
@@ -78,6 +89,9 @@
 		autoReserveMinutes: 30,
 		buyResearch: true,
 		elderPledge: false,
+		autoHarvestLumps: true,
+		autoSpendLumps: false,
+		keepLumps: 0,
 		autoAscend: false,
 		ascendMode: 'gained',
 		ascendThreshold: 1000,
@@ -94,8 +108,26 @@
 		return typeof key === 'string' && Object.prototype.hasOwnProperty.call(object, key);
 	}
 
+	function defaultLumpPriority() {
+		return DEFAULT_LUMP_PRIORITY.map(function (entry) { return Object.assign({}, entry); });
+	}
+
+	function isValidPriorityEntry(entry) {
+		return !!entry && typeof entry === 'object' && hasKey(Game.Objects, entry.building) &&
+			Number.isInteger(entry.level) && entry.level >= 1 && entry.level <= MAX_TARGET_LEVEL;
+	}
+
+	// Any bad entry means the saved list can't be trusted, so the whole list falls back to the default.
+	function sanitizeLumpPriority(raw) {
+		if (!Array.isArray(raw) || raw.length > MAX_PRIORITY_ENTRIES || !raw.every(isValidPriorityEntry)) {
+			return defaultLumpPriority();
+		}
+		return raw.map(function (entry) { return { building: entry.building, level: entry.level }; });
+	}
+
 	function sanitizeSettings(raw) {
 		const settings = Object.assign({}, DEFAULTS);
+		settings.lumpPriority = sanitizeLumpPriority(raw && raw.lumpPriority);
 		if (!raw || typeof raw !== 'object') return settings;
 
 		for (const key in DEFAULTS) {
@@ -107,6 +139,7 @@
 		settings.clickRate = clampInt(raw.clickRate, 0, MAX_CLICK_RATE, DEFAULTS.clickRate);
 		settings.autoReserveMinutes = clampInt(raw.autoReserveMinutes, 0, MAX_AUTO_RESERVE_MINUTES, DEFAULTS.autoReserveMinutes);
 		settings.ascendThreshold = clampInt(raw.ascendThreshold, 1, Number.MAX_SAFE_INTEGER, DEFAULTS.ascendThreshold);
+		settings.keepLumps = clampInt(raw.keepLumps, 0, MAX_KEEP_LUMPS, DEFAULTS.keepLumps);
 		const savedVersion = Number(raw.settingsVersion) || 1;
 		if (savedVersion < 2) settings.autoAscend = DEFAULTS.autoAscend;
 		if (savedVersion < 3) settings.elderPledge = DEFAULTS.elderPledge;
@@ -131,6 +164,11 @@
 		stalePriceKey: '',
 		stalePriceSince: 0,
 		lastDumpSignature: '',
+		nextLumpCheckAt: 0,
+		lastHarvest: '',
+		lastLevelUp: '',
+		// The Add row of the lump priority list, kept here so menu rebuilds don't lose it.
+		lumpDraft: { building: DEFAULT_LUMP_PRIORITY[0].building, level: '1' },
 		ascendTriggered: false,
 		// Set when the threshold was already met at load or by a settings change; cleared by re-arming.
 		ascendWarning: false,
@@ -141,7 +179,7 @@
 
 	const mod = {
 		version: VERSION,
-		settings: Object.assign({}, DEFAULTS),
+		settings: sanitizeSettings(null),
 		state: state,
 		init: function () {
 			Game.registerHook('logic', onLogic);
@@ -200,6 +238,7 @@
 			if (s.wrinklerMode === 'instant') popWrinklers(false);
 			if (s.clickFortunes) clickFortune();
 			runAutoBuy(now);
+			runLumps(now);
 			checkAutoAscend();
 			refreshStatusLine(now);
 		} catch (e) {
@@ -430,14 +469,14 @@
 		state.refreshesSinceBuy++;
 	}
 
-	// Runs one of our own purchases with the buy sound suppressed. PlaySound is a global the game looks up
+	// Runs one of our own purchases or level-ups with its sound suppressed. PlaySound is a global the game looks up
 	// on every call, so swapping it only for the length of this call leaves the player's purchases,
 	// golden cookies and every other sound alone.
-	function withBuySoundMuted(purchase) {
+	function withPurchaseSoundMuted(purchase) {
 		if (!settings().muteBuySounds) return purchase();
 		const originalPlaySound = window.PlaySound;
 		window.PlaySound = function (url) {
-			if (typeof url === 'string' && BUY_SOUND.test(url)) return 0;
+			if (typeof url === 'string' && PURCHASE_SOUND.test(url)) return 0;
 			return originalPlaySound.apply(this, arguments);
 		};
 		try {
@@ -450,7 +489,7 @@
 	function tryBuyUpgrade(upgrade) {
 		if (upgrade.bought || !canAfford(upgrade.getPrice()) || !upgrade.canBuy()) return false;
 		// buy(1) skips confirmation prompts such as the one on "One mind".
-		withBuySoundMuted(function () { upgrade.buy(1); });
+		withPurchaseSoundMuted(function () { upgrade.buy(1); });
 		const bought = !!upgrade.bought;
 		if (bought) debugLog('Bought upgrade', upgrade.name);
 		return bought;
@@ -464,7 +503,7 @@
 		const savedMode = Game.buyMode;
 		Game.buyMode = 1;
 		try {
-			withBuySoundMuted(function () { building.buy(amount); });
+			withPurchaseSoundMuted(function () { building.buy(amount); });
 		} finally {
 			Game.buyMode = savedMode;
 		}
@@ -752,6 +791,109 @@
 	}
 
 	/* =====================================================================
+	   SUGAR LUMPS
+	   ===================================================================== */
+
+	// Indexed by Game.lumpCurrentType.
+	const LUMP_TYPES = ['normal', 'bifurcated', 'golden', 'meaty', 'caramelized'];
+
+	function lumpCount(n) {
+		return `${Beautify(n)} lump${n === 1 ? '' : 's'}`;
+	}
+
+	// The game hides sugar lumps during a Born again run, so they can't be harvested or spent by hand there.
+	function isBornAgain() {
+		return Game.ascensionMode === 1;
+	}
+
+	function lumpAge() {
+		return Date.now() - Game.lumpT;
+	}
+
+	// The same test Game.clickLump uses: ripe from lumpRipeAge until the game drops it at lumpOverripeAge.
+	function isLumpRipe() {
+		const age = lumpAge();
+		return age >= Game.lumpRipeAge && age < Game.lumpOverripeAge;
+	}
+
+	// Game.clickLump harvests every lump type; the type only changes how many lumps it yields.
+	function harvestRipeLump() {
+		if (!isLumpRipe()) return;
+		const type = LUMP_TYPES[Game.lumpCurrentType] || 'unknown';
+		const lumpsBefore = Game.lumps;
+		Game.clickLump();
+		const gained = Game.lumps - lumpsBefore;
+		state.lastHarvest = `+${gained} from a ${type} lump`;
+		debugLog(`Harvested a ${type} sugar lump: +${gained}.`);
+	}
+
+	// Object.levelUp charges level + 1 lumps to go from `level` to the next one.
+	function levelCost(level) {
+		return level + 1;
+	}
+
+	// The first entry whose building is below its target. Later entries wait until it's done.
+	function nextLumpSpend() {
+		for (const entry of settings().lumpPriority) {
+			const building = Game.Objects[entry.building];
+			if (building && building.level < entry.level) {
+				return { building: building, target: entry.level, cost: levelCost(building.level) };
+			}
+		}
+		return null;
+	}
+
+	// Lumps needed to finish the whole list from the current levels. A building listed more than
+	// once (Farm to 1, later Farm to 9) has each of its levels counted once.
+	function lumpsToFinishList() {
+		const levels = {};
+		let total = 0;
+		for (const entry of settings().lumpPriority) {
+			const building = Game.Objects[entry.building];
+			if (!building) continue;
+			let level = hasKey(levels, entry.building) ? levels[entry.building] : building.level;
+			for (; level < entry.level; level++) total += levelCost(level);
+			levels[entry.building] = level;
+		}
+		return total;
+	}
+
+	// Object.levelUp spends through Game.spendLump, which opens a Yes/No prompt instead of spending
+	// while the game's "Lump confirmation" option is on. Switch it off for our own call only.
+	function levelUpBuilding(building) {
+		const levelBefore = building.level;
+		const savedAskLumps = Game.prefs.askLumps;
+		Game.prefs.askLumps = 0;
+		try {
+			withPurchaseSoundMuted(function () { building.levelUp(); });
+		} finally {
+			Game.prefs.askLumps = savedAskLumps;
+		}
+		return building.level > levelBefore;
+	}
+
+	// Building levels are the only thing lumps are ever spent on. A building that isn't owned yet is
+	// levelled too, since levels carry over through ascensions.
+	function spendLumps() {
+		const next = nextLumpSpend();
+		if (!next || Game.lumps - next.cost < settings().keepLumps) return;
+		if (!levelUpBuilding(next.building)) return;
+		state.lastLevelUp = `Leveled ${next.building.name} to ${next.building.level}` +
+			(next.building.amount === 0 ? ' (none owned yet)' : '');
+		debugLog(state.lastLevelUp);
+	}
+
+	function runLumps(now) {
+		if (now < state.nextLumpCheckAt) return;
+		state.nextLumpCheckAt = now + LUMP_CHECK_INTERVAL_MS;
+		// canLumps is false until the save has baked a billion cookies in total.
+		if (!Game.canLumps() || isBornAgain()) return;
+		const s = settings();
+		if (s.autoHarvestLumps) harvestRipeLump();
+		if (s.autoSpendLumps) spendLumps();
+	}
+
+	/* =====================================================================
 	   AUTO-ASCEND
 	   ===================================================================== */
 
@@ -816,16 +958,17 @@
 		const originalUpdateMenu = Game.UpdateMenu;
 		Game.UpdateMenu = function () {
 			// The game rebuilds the Options menu every 5 seconds; don't wipe a field the player is typing in.
-			if (Game.onMenu === 'prefs' && isEditingNumber() && document.getElementById('afkBakerMenu')) return;
+			if (Game.onMenu === 'prefs' && isEditingField() && document.getElementById('afkBakerMenu')) return;
 			const result = originalUpdateMenu.apply(this, arguments);
 			if (Game.onMenu === 'prefs') renderMenuSection();
 			return result;
 		};
 	}
 
-	function isEditingNumber() {
+	// A focused text field or dropdown in our section: a number, or the priority list's Add row.
+	function isEditingField() {
 		const el = document.activeElement;
-		return !!(el && el.dataset && el.dataset.afkNumber);
+		return !!(el && (el.tagName === 'INPUT' || el.tagName === 'SELECT') && el.closest('#afkBakerMenu'));
 	}
 
 	function escapeHtml(text) {
@@ -844,9 +987,38 @@
 		return `<a class="smallFancyButton option" data-afk-cycle="${key}">${label}: ${value}</a>`;
 	}
 
+	const FIELD_STYLE = 'background:#000;color:#ccc;border:1px solid #ccc;padding:3px 6px;font-size:12px;margin:2px 4px 2px 0px;';
+
 	function numberInput(key) {
 		return `<input type="text" inputmode="numeric" data-afk-number="${key}" value="${settings()[key]}" ` +
-			'style="width:90px;background:#000;color:#ccc;border:1px solid #ccc;padding:3px 6px;font-size:12px;margin:2px 4px 2px 0px;">';
+			`style="width:90px;${FIELD_STYLE}">`;
+	}
+
+	function lumpButton(action, index, label) {
+		return `<a class="smallFancyButton option" data-afk-lump="${action}" data-index="${index}">${label}</a>`;
+	}
+
+	function lumpPriorityHtml() {
+		const list = settings().lumpPriority;
+		const rows = list.map(function (entry, i) {
+			const level = Game.Objects[entry.building].level;
+			const progress = level >= entry.level ? 'done' : `now ${level}`;
+			return listing(`<label>${i + 1}. ${escapeHtml(entry.building)} to level ${entry.level} (${progress})</label> ` +
+				lumpButton('up', i, 'Up') + lumpButton('down', i, 'Down') + lumpButton('remove', i, 'Remove'));
+		});
+		if (!rows.length) rows.push(listing(note('empty, so nothing will be levelled')));
+
+		const draft = state.lumpDraft;
+		const options = Object.keys(Game.Objects).map(function (name) {
+			return `<option value="${escapeHtml(name)}"${name === draft.building ? ' selected' : ''}>${escapeHtml(name)}</option>`;
+		}).join('');
+		return listing('<label>Priority list, levelled from the top down:</label>') +
+			rows.join('') +
+			listing(`<label>Add</label> <select data-afk-lump-field="building" style="${FIELD_STYLE}">${options}</select>` +
+				`<label>to level</label> <input type="text" inputmode="numeric" data-afk-lump-field="level" ` +
+				`value="${escapeHtml(draft.level)}" style="width:50px;${FIELD_STYLE}">` +
+				lumpButton('add', -1, 'Add')) +
+			listing(lumpButton('reset', -1, 'Reset to default') + note('Farm, Temple, Wizard tower and Bank to level 1, which unlocks their minigames'));
 	}
 
 	function heading(text) {
@@ -881,6 +1053,42 @@
 		return line;
 	}
 
+	function formatDuration(ms) {
+		const minutes = Math.max(0, Math.ceil(ms / 60000));
+		const hours = Math.floor(minutes / 60);
+		return hours > 0 ? `${hours}h ${minutes % 60}m` : `${minutes}m`;
+	}
+
+	function lumpLines() {
+		if (!Game.canLumps()) return ['Sugar lumps: not unlocked yet (they start once you have baked a billion cookies)'];
+		const s = settings();
+		const age = lumpAge();
+		let harvest;
+		if (isBornAgain()) harvest = 'auto-harvest and auto-spend are paused during Born again';
+		else if (!isLumpRipe()) harvest = `current lump ripe in ${formatDuration(Game.lumpRipeAge - age)}`;
+		else if (s.autoHarvestLumps) harvest = 'current lump is ripe, harvesting';
+		else harvest = `current lump is ripe, the game drops it in ${formatDuration(Game.lumpOverripeAge - age)}`;
+		if (!s.autoHarvestLumps && !isBornAgain()) harvest += ', auto-harvest off';
+		let lumpLine = `Sugar lumps: ${lumpCount(Game.lumps)} owned, ${harvest}`;
+		if (state.lastHarvest) lumpLine += `. Last harvest: ${state.lastHarvest}`;
+
+		let spend;
+		const next = nextLumpSpend();
+		if (!next) {
+			spend = 'priority list complete';
+		} else {
+			const need = next.cost + s.keepLumps - Game.lumps;
+			spend = `Next: ${next.building.name} to level ${next.building.level + 1}` +
+				(next.target > next.building.level + 1 ? ` (target ${next.target})` : '') +
+				(need > 0 ? `, ${Beautify(need)} more ${need === 1 ? 'lump' : 'lumps'} needed` : `, costs ${lumpCount(next.cost)}`) +
+				(next.building.amount === 0 ? ', none owned yet' : '') +
+				`. ${lumpCount(lumpsToFinishList())} to finish the list`;
+		}
+		let spendLine = `Lump spending: ${s.autoSpendLumps ? '' : 'auto-spend off. '}${spend}`;
+		if (state.lastLevelUp) spendLine += `. Last: ${state.lastLevelUp}`;
+		return [lumpLine, spendLine];
+	}
+
 	function statusLines() {
 		const s = settings();
 		const progress = prestigeProgress();
@@ -893,8 +1101,7 @@
 			`Auto-buy: ${state.buyStatus}`,
 			`Cookie reserve: ${Beautify(reserveAmount())} (${reserveLabel()})`,
 			wrinklerLine(),
-			ascendLine,
-		];
+		].concat(lumpLines(), [ascendLine]);
 		if (s.autoAscend && state.ascendWarning) {
 			lines.push('WARNING: Threshold already reached. Toggle auto-ascend off and on to confirm.');
 		}
@@ -928,6 +1135,12 @@
 			listing(toggleButton('buyResearch', 'Buy research') + note('research upgrades advance the grandmapocalypse')) +
 			listing(toggleButton('elderPledge', 'Elder Pledge') + note('pledging stops wrinklers from spawning; never pledges in Feed mode or while a shiny is on screen')) +
 
+			heading('Sugar lumps') +
+			listing(toggleButton('autoHarvestLumps', 'Auto-harvest sugar lumps') + note('only when ripe, every lump type; paused during Born again')) +
+			listing(toggleButton('autoSpendLumps', 'Auto-spend sugar lumps') + note('only on building levels, in list order; never skips ahead to a later entry')) +
+			listing(`<label>Keep at least</label> ${numberInput('keepLumps')}<label>lumps</label>`) +
+			lumpPriorityHtml() +
+
 			heading('Auto-ascend') +
 			listing(toggleButton('autoAscend', 'Auto-ascend') + cycleButton('ascendMode', 'Threshold type')) +
 			listing(`<label>Threshold</label> ${numberInput('ascendThreshold')}${note('ascends only; reincarnating and heavenly upgrades are up to you')}`) +
@@ -950,6 +1163,7 @@
 		section.innerHTML = menuHtml();
 		section.addEventListener('click', onMenuClick);
 		section.addEventListener('change', onMenuChange);
+		section.addEventListener('input', onMenuInput);
 		section.addEventListener('keydown', onMenuKeyDown);
 
 		const existing = document.getElementById('afkBakerMenu');
@@ -960,10 +1174,12 @@
 	}
 
 	function onMenuClick(event) {
-		const target = event.target.closest('[data-afk-toggle],[data-afk-cycle]');
+		const target = event.target.closest('[data-afk-toggle],[data-afk-cycle],[data-afk-lump]');
 		if (!target) return;
 		const s = settings();
-		if (target.dataset.afkToggle) {
+		if (target.dataset.afkLump) {
+			editLumpPriority(target.dataset.afkLump, Number(target.dataset.index));
+		} else if (target.dataset.afkToggle) {
 			const key = target.dataset.afkToggle;
 			s[key] = !s[key];
 			if (key === 'autoAscend') onAutoAscendToggled();
@@ -977,8 +1193,38 @@
 		renderMenuSection();
 	}
 
+	function editLumpPriority(action, index) {
+		const s = settings();
+		const list = s.lumpPriority;
+		const valid = index >= 0 && index < list.length;
+		if (action === 'up' && valid && index > 0) {
+			list.splice(index - 1, 0, list.splice(index, 1)[0]);
+		} else if (action === 'down' && valid && index < list.length - 1) {
+			list.splice(index + 1, 0, list.splice(index, 1)[0]);
+		} else if (action === 'remove' && valid) {
+			list.splice(index, 1);
+		} else if (action === 'reset') {
+			s.lumpPriority = defaultLumpPriority();
+		} else if (action === 'add') {
+			const level = clampInt(state.lumpDraft.level, 1, MAX_TARGET_LEVEL, 0);
+			if (level && hasKey(Game.Objects, state.lumpDraft.building) && list.length < MAX_PRIORITY_ENTRIES) {
+				list.push({ building: state.lumpDraft.building, level: level });
+			}
+		}
+	}
+
+	// Keeps the Add row's building and level in state, so a menu rebuild doesn't lose them.
+	function onMenuInput(event) {
+		const field = event.target.dataset && event.target.dataset.afkLumpField;
+		if (field) state.lumpDraft[field] = event.target.value;
+	}
+
 	function onMenuChange(event) {
 		const input = event.target;
+		if (input.dataset && input.dataset.afkLumpField) {
+			onMenuInput(event);
+			return;
+		}
 		const key = input.dataset && input.dataset.afkNumber;
 		if (!key) return;
 		const s = settings();
@@ -989,13 +1235,24 @@
 		} else if (key === 'ascendThreshold') {
 			s.ascendThreshold = clampInt(input.value, 1, Number.MAX_SAFE_INTEGER, 1);
 			recheckAscendWarning();
+		} else if (key === 'keepLumps') {
+			s.keepLumps = clampInt(input.value, 0, MAX_KEEP_LUMPS, s.keepLumps);
 		}
 		input.value = s[key];
 		refreshStatusLine(Date.now(), true);
 	}
 
 	function onMenuKeyDown(event) {
-		if (event.key === 'Enter' && event.target.dataset && event.target.dataset.afkNumber) event.target.blur();
+		if (event.key !== 'Enter' || !event.target.dataset) return;
+		if (event.target.dataset.afkNumber) {
+			event.target.blur();
+		} else if (event.target.dataset.afkLumpField === 'level') {
+			// Enter in the Add row's level field adds the entry, like clicking Add.
+			state.lumpDraft.level = event.target.value;
+			editLumpPriority('add', -1);
+			PlaySound('snd/tick.mp3');
+			renderMenuSection();
+		}
 	}
 
 	function refreshStatusLine(now, force) {

@@ -2,10 +2,10 @@
 	"Name": "AFK Baker",
 	"ID": "afk baker",
 	"Author": "Reaver",
-	"Description": "Plays Cookie Clicker while you're away: autoclicker, golden cookies, reindeer, wrinklers, fortunes, Cookie Monster-driven auto-buy and auto-ascend. Requires Cookie Monster.",
-	"ModVersion": 1.4,
+	"Description": "Plays Cookie Clicker while you're away: autoclicker, golden cookies, reindeer, wrinklers, fortunes, Cookie Monster-driven auto-buy, sugar lump harvesting and building levels, and auto-ascend. Requires Cookie Monster.",
+	"ModVersion": 1.5,
 	"GameVersion": 2.053,
-	"Date": "28/09/2026",
+	"Date": "29/09/2026",
 	"Dependencies": ["cookie monster"],
 	"AllowSteamAchievs": 1
 }
