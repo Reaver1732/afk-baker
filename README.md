@@ -1,6 +1,6 @@
 # AFK Baker
 
-A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building or upgrade according to [Cookie Monster](https://steamcommunity.com/sharedfiles/filedetails/?id=2685721341), and ascends when you reach a prestige goal.
+A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building (1, 10 or 100 at a time) or upgrade according to [Cookie Monster](https://steamcommunity.com/sharedfiles/filedetails/?id=2685721341), and ascends when you reach a prestige goal.
 
 It uses only the game's built-in mod API (`Game.registerMod`). CCSE is not needed.
 
@@ -10,6 +10,7 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
 
 **Clickers**
 - **Big cookie autoclicker**: set the clicks per second (default 30, 0 turns it off, maximum 50, which is the game's own limit). It keeps clicking while the window is minimized. When the game slows down in the background, the mod sends the missed clicks as one bigger click. Your cookie click count and hand-made cookies still count every one of them.
+- **Mute big cookie click sound** (on by default): silences only the big cookie's click sound, for your own clicks and the autoclicker's. Golden cookies, buying and every other game sound play as normal, and the game's volume is not changed.
 - **Golden cookies**: clicked as soon as they appear. A separate switch covers wrath cookies.
 - **Reindeer**: clicked as soon as they appear.
 - **Wrinklers**: choose one of three modes. During a run, shiny wrinklers are always left alone.
@@ -21,11 +22,13 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
   - **Off**: never touches wrinklers.
 - **Fortune tickers**: click every fortune, or only the ones that unlock fortune upgrades.
 
-**Auto-buy** (checks about once a second)
-- Picks the building (buying 1) or upgrade with the lowest payback period (PP) according to Cookie Monster. If it can't afford that item yet, it waits and saves up rather than buying something worse.
+**Auto-buy**
+- Picks the item with the lowest payback period (PP) according to Cookie Monster: any upgrade, or 1, 10 or 100 of any building. A bundle of 10 or 100 is bought in one purchase through the game's own bulk buy. The store's Buy/Sell mode and bulk setting are left as you had them. If it can't afford the best item yet, it waits and saves up rather than buying something worse.
+- While it's waiting it checks about once a second. After each purchase it buys again as soon as Cookie Monster has recalculated (about 15 purchases a second when there's a lot to buy), and it never buys twice using the same out-of-date data.
+- If the best item can't be bought at all (the purchase fails, the game refuses it, or Cookie Monster's price for it stays out of date), it skips that item for a minute and moves on to the next best.
 - **Cookie reserve**: how many cookies to keep banked. Lucky and Lucky + Frenzy are the bank sizes needed for a full Lucky payout.
-  - **Auto** (default): no reserve for the first 30 minutes of a run, then the same as Lucky. You can change the number of minutes.
-  - **Off**: no reserve.
+  - **Off** (default): no reserve. Updating from 1.2 or earlier switches the reserve to Off once. After that, your choice is kept.
+  - **Auto**: no reserve for the first 30 minutes of a run, then the same as Lucky. You can change the number of minutes.
   - **Lucky**: keeps 6,000× your unbuffed CpS banked.
   - **Lucky + Frenzy**: keeps 42,000× your unbuffed CpS banked.
 - **Research**: buys research upgrades as soon as it can afford them, respecting the reserve.
@@ -33,7 +36,7 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
   - It never pledges in Feed mode.
   - It never pledges while a shiny wrinkler is on screen, because the game's pledge pops every wrinkler, shinies included.
   - To end the grandmapocalypse automatically, switch the wrinkler mode to Pop instantly or Off, and turn this on.
-- **Never buys**:
+- **Never buys** (these are removed before the best item is picked, so they never hold up auto-buy):
   - switches and selectors (the `toggle` pool)
   - debug upgrades
   - heavenly upgrades
@@ -53,8 +56,14 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
 - It is **off** by default. The default threshold is 1,000 prestige gained.
 - **Safety guard**: auto-ascend only fires when you cross the threshold during play. If the threshold is already reached when the mod loads, when you turn auto-ascend on, or when you change the threshold, type or wrinkler mode, the mod shows a warning instead of ascending. To confirm, toggle auto-ascend off and on again.
 
+**Other**
+- **Debug logging**: extra console output. When the auto-buy decision changes, it prints the top 5 candidates (name, amount, PP, price, and why each was chosen or skipped) and the upgrades filtered out before ranking.
+
 The Options section also shows a live status line:
-- what auto-buy is doing
+- what auto-buy is doing. When it's waiting, it shows the target, its price, the reserve and how many more cookies are needed, and says which of these it's waiting on:
+  - **Waiting on the item**: the bank can't cover the item yet, e.g. `saving for 10x Grandma (1.2 trillion) + reserve (8.4 trillion), need 3.1 trillion more`.
+  - **Waiting on reserve**: the item is affordable, but buying it would dip into the reserve.
+  - **Waiting on Cookie Monster data**: Cookie Monster isn't loaded, or its numbers are out of date.
 - your current reserve
 - how many wrinklers are feeding, and how many cookies they would pay out
 - your progress toward the ascend threshold, plus the guard warning when it's active
