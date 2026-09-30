@@ -69,7 +69,15 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
   - Buildings you don't own yet are levelled too, because levels carry over through ascensions. The status line notes it, e.g. `Leveled Wizard tower to 3 (none owned yet)`.
   - **Keep at least N lumps** (default 0): the mod never spends below this.
   - Paused during a Born again run, like harvesting.
-- **Priority list**: shown in the Sugar lumps section as rows with Up, Down and Remove buttons. Use the Add row (a building dropdown and a target level, then Add or Enter) to add entries, and **Reset to default** to start over.
+- **Priority list editor** in the Sugar lumps section:
+  - **Building palette**: every building in a grid, with the game's own store icon, its name and its current level. Buildings you don't own yet are dimmed but can still be used.
+  - **Drag a building from the palette into the list** to add it. Its target starts at its current level + 1, and it goes in wherever you drop it. A gold line shows where it will land.
+  - **The list** has aligned columns: drag handle (≡), priority number, icon, building, current level, target level, status (done, next or waiting), and the lumps still needed for that entry, then Up, Down and Remove buttons.
+  - **Drag a row by its ≡ handle** to reorder it.
+  - **Edit a target level right in the row.** A valid whole number saves as you type. Anything else is corrected when you leave the field or press Enter: at least 1, at most 1000, decimals rounded down.
+  - The Up, Down and Remove buttons and the Add row (a building dropdown and a target level, then Add or Enter) still work for anyone who'd rather not drag. **Reset to default** starts over.
+  - Press Escape to cancel a drag. Dropping outside the list changes nothing, and dragging never clicks the big cookie or anything else in the game. The game's 5-second Options refresh waits until a drag is finished.
+  - On a narrow window the palette wraps, and each list row takes two lines so nothing scrolls sideways.
   - The default list only unlocks the minigames: Farm 1 (Garden), Temple 1 (Pantheon), Wizard tower 1 (Grimoire), Bank 1 (Stock Market). Add anything else yourself.
   - The list is saved with your other settings. If the saved list is damaged, the default list is used instead.
 

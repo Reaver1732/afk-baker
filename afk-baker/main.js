@@ -7,7 +7,7 @@
 	'use strict';
 
 	const MOD_ID = 'afk baker';
-	const VERSION = '1.5.0';
+	const VERSION = '1.6.0';
 	// Settings saved before a default changed are reset to the new default:
 	// v1 had auto-ascend on, v2 had Elder Pledge on, v3 had the Auto reserve.
 	const SETTINGS_VERSION = 4;
@@ -169,6 +169,8 @@
 		lastLevelUp: '',
 		// The Add row of the lump priority list, kept here so menu rebuilds don't lose it.
 		lumpDraft: { building: DEFAULT_LUMP_PRIORITY[0].building, level: '1' },
+		drag: null, // a drag in the lump priority list, from pointerdown until it ends
+		renderPending: false,
 		ascendTriggered: false,
 		// Set when the threshold was already met at load or by a settings change; cleared by re-arming.
 		ascendWarning: false,
@@ -185,6 +187,7 @@
 			Game.registerHook('logic', onLogic);
 			Game.registerHook('reincarnate', onReincarnate);
 			Game.registerHook('reset', onReset);
+			installStyles();
 			installMenuHook();
 			installClickSoundHook();
 			console.log(`${LOG_PREFIX} v${VERSION} loaded.`);
@@ -843,19 +846,28 @@
 		return null;
 	}
 
-	// Lumps needed to finish the whole list from the current levels. A building listed more than
-	// once (Farm to 1, later Farm to 9) has each of its levels counted once.
-	function lumpsToFinishList() {
+	// Each entry's status (done, next or waiting) and the lumps it still needs, levelling the list in
+	// order. A building listed more than once (Farm to 1, later Farm to 9) has each level counted once.
+	function lumpPlan() {
 		const levels = {};
-		let total = 0;
-		for (const entry of settings().lumpPriority) {
+		let nextFound = false;
+		return settings().lumpPriority.map(function (entry) {
 			const building = Game.Objects[entry.building];
-			if (!building) continue;
 			let level = hasKey(levels, entry.building) ? levels[entry.building] : building.level;
-			for (; level < entry.level; level++) total += levelCost(level);
+			let cost = 0;
+			for (; level < entry.level; level++) cost += levelCost(level);
 			levels[entry.building] = level;
-		}
-		return total;
+			let status = 'done';
+			if (building.level < entry.level) {
+				status = nextFound ? 'waiting' : 'next';
+				nextFound = true;
+			}
+			return { entry: entry, building: building, cost: cost, status: status };
+		});
+	}
+
+	function lumpsToFinishList() {
+		return lumpPlan().reduce(function (total, item) { return total + item.cost; }, 0);
 	}
 
 	// Object.levelUp spends through Game.spendLump, which opens a Yes/No prompt instead of spending
@@ -958,7 +970,8 @@
 		const originalUpdateMenu = Game.UpdateMenu;
 		Game.UpdateMenu = function () {
 			// The game rebuilds the Options menu every 5 seconds; don't wipe a field the player is typing in.
-			if (Game.onMenu === 'prefs' && isEditingField() && document.getElementById('afkBakerMenu')) return;
+			// The same goes for a drag in progress in the lump priority list.
+			if (Game.onMenu === 'prefs' && (isEditingField() || state.drag) && document.getElementById('afkBakerMenu')) return;
 			const result = originalUpdateMenu.apply(this, arguments);
 			if (Game.onMenu === 'prefs') renderMenuSection();
 			return result;
@@ -989,31 +1002,114 @@
 
 	const FIELD_STYLE = 'background:#000;color:#ccc;border:1px solid #ccc;padding:3px 6px;font-size:12px;margin:2px 4px 2px 0px;';
 
+	// Layout for the lump priority list. Borders, fonts and buttons come from the game's own classes
+	// (smallFramed, smallFancyButton, option, tinyProductIcon). The game runs Electron 11 (Chromium 87),
+	// so nothing newer than that is used.
+	const STYLES = `
+#afkBakerMenu .afk-palette{display:grid;grid-template-columns:repeat(auto-fill,minmax(66px,1fr));grid-gap:6px;padding:4px 16px 8px;}
+#afkBakerMenu .afk-tile{padding:5px 2px 4px;text-align:center;cursor:grab;user-select:none;touch-action:none;overflow:hidden;}
+#afkBakerMenu .afk-tile:hover{border-color:#fff;}
+#afkBakerMenu .afk-unowned{opacity:0.45;}
+#afkBakerMenu .afk-tile .afk-icon{margin:0 auto;}
+#afkBakerMenu .afk-icon,.afk-ghost .afk-icon{width:32px;height:32px;pointer-events:none;}
+#afkBakerMenu .afk-tile-name{font-family:'Merriweather',Georgia,serif;font-variant:small-caps;font-weight:bold;font-size:11px;line-height:1.15;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+#afkBakerMenu .afk-tile-level{font-size:10px;opacity:0.75;margin-top:1px;}
+#afkBakerMenu .afk-list{position:relative;margin:2px 16px 6px;overflow-x:auto;}
+#afkBakerMenu .afk-row{display:grid;grid-template-columns:14px 18px 32px minmax(56px,1fr) 28px 44px 50px 42px 68px;grid-column-gap:4px;align-items:center;min-width:370px;min-height:36px;padding:1px 2px;border-bottom:1px solid rgba(255,255,255,0.1);font-size:12px;}
+#afkBakerMenu .afk-head{min-height:0;padding:2px 2px;font-size:11px;font-weight:bold;font-variant:small-caps;opacity:0.6;border-bottom:1px solid rgba(255,255,255,0.25);}
+#afkBakerMenu .afk-handle{cursor:grab;user-select:none;touch-action:none;text-align:center;font-size:18px;line-height:32px;opacity:0.6;}
+#afkBakerMenu .afk-handle:hover{opacity:1;}
+#afkBakerMenu .afk-num,#afkBakerMenu .afk-cur,#afkBakerMenu .afk-need{text-align:center;}
+#afkBakerMenu .afk-name{font-family:'Merriweather',Georgia,serif;font-variant:small-caps;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+#afkBakerMenu .afk-target{width:28px;text-align:center;padding:3px 2px !important;}
+#afkBakerMenu .afk-status{font-variant:small-caps;font-weight:bold;}
+#afkBakerMenu .afk-status-done{opacity:0.5;}
+#afkBakerMenu .afk-status-next .afk-status{color:#ffe38c;text-shadow:0px 0px 4px rgba(255,200,80,0.6);}
+#afkBakerMenu .afk-status-waiting .afk-status{opacity:0.7;}
+#afkBakerMenu .afk-btns{white-space:nowrap;text-align:right;}
+#afkBakerMenu a.option.smallFancyButton.afk-mini{width:auto;min-width:0;padding:2px 4px;margin:0px 0px 0px 2px;text-align:center;font-size:10px;}
+#afkBakerMenu .afk-stats{display:contents;}
+#afkBakerMenu .afk-narrow .afk-row{grid-template-columns:14px 18px 32px minmax(0,1fr) 68px;grid-row-gap:2px;min-width:0;padding:3px 2px;}
+#afkBakerMenu .afk-narrow .afk-row>:nth-child(1){grid-row:1 / span 2;}
+#afkBakerMenu .afk-narrow .afk-stats{display:grid;grid-template-columns:28px 44px 50px 42px;grid-column-gap:4px;align-items:center;grid-row:2;grid-column:2 / span 4;}
+#afkBakerMenu .afk-narrow .afk-row>:nth-child(6){grid-row:1;grid-column:5;}
+#afkBakerMenu .afk-empty{padding:10px 4px;opacity:0.6;font-style:italic;}
+#afkBakerMenu .afk-drop-line{display:none;position:absolute;left:0px;right:0px;height:3px;margin-top:-2px;border-radius:2px;background:#ffe38c;box-shadow:0px 0px 6px 1px rgba(255,200,80,0.8);pointer-events:none;z-index:5;}
+#afkBakerMenu .afk-row.afk-drag-source{opacity:0.3;}
+body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
+.afk-ghost{position:fixed;left:0px;top:0px;z-index:100000000;pointer-events:none;display:flex;align-items:center;padding:3px 10px 3px 4px;font-family:'Merriweather',Georgia,serif;font-variant:small-caps;font-weight:bold;font-size:13px;color:#fff;opacity:0.92;}
+`;
+
+	function installStyles() {
+		if (document.getElementById('afkBakerStyles')) return;
+		const style = document.createElement('style');
+		style.id = 'afkBakerStyles';
+		style.textContent = STYLES;
+		document.head.appendChild(style);
+	}
+
 	function numberInput(key) {
 		return `<input type="text" inputmode="numeric" data-afk-number="${key}" value="${settings()[key]}" ` +
 			`style="width:90px;${FIELD_STYLE}">`;
 	}
 
-	function lumpButton(action, index, label) {
-		return `<a class="smallFancyButton option" data-afk-lump="${action}" data-index="${index}">${label}</a>`;
+	function lumpButton(action, index, label, title) {
+		const mini = title ? ` afk-mini" title="${title}` : '';
+		return `<a class="smallFancyButton option${mini}" data-afk-lump="${action}" data-index="${index}">${label}</a>`;
+	}
+
+	// Drawn the way the store does it: a 64px tile of img/buildings.png (column 0, row building.icon,
+	// or iconFunc for the Grandma's grandmapocalypse faces), shown at half size by .tinyProductIcon.
+	function buildingIconHtml(building) {
+		const icon = building.iconFunc ? building.iconFunc() : [0, building.icon];
+		return `<div class="afk-icon"><div class="tinyProductIcon" style="background-position:-${icon[0] * 64}px -${icon[1] * 64}px;"></div></div>`;
+	}
+
+	function lumpPaletteHtml() {
+		const tiles = Object.keys(Game.Objects).map(function (name) {
+			const building = Game.Objects[name];
+			const owned = building.amount > 0;
+			return `<div class="afk-tile smallFramed${owned ? '' : ' afk-unowned'}" data-afk-drag="palette" data-building="${escapeHtml(name)}" ` +
+				`title="${escapeHtml(name)}: level ${building.level}, ${owned ? `${building.amount} owned` : 'none owned yet'}. Drag into the list to add it.">` +
+				buildingIconHtml(building) +
+				`<div class="afk-tile-name">${escapeHtml(name)}</div>` +
+				`<div class="afk-tile-level">Lv ${building.level}</div></div>`;
+		});
+		return `<div class="afk-palette">${tiles.join('')}</div>`;
+	}
+
+	function lumpListHtml() {
+		const rows = lumpPlan().map(function (item, i) {
+			const need = item.cost > 0 ? Beautify(item.cost) : '-';
+			return `<div class="afk-row afk-status-${item.status}" data-afk-row="${i}">` +
+				`<div class="afk-handle" data-afk-drag="row" data-index="${i}" title="Drag to reorder">&#8801;</div>` +
+				`<div class="afk-num">${i + 1}</div>` +
+				buildingIconHtml(item.building) +
+				`<div class="afk-name" title="${escapeHtml(item.entry.building)}">${escapeHtml(item.entry.building)}</div>` +
+				'<div class="afk-stats">' +
+				`<div class="afk-cur">${item.building.level}</div>` +
+				`<div><input type="text" inputmode="numeric" class="afk-target" data-afk-lump-target="${i}" value="${item.entry.level}" ` +
+				`title="Target level" style="${FIELD_STYLE}"></div>` +
+				`<div class="afk-status">${item.status}</div>` +
+				`<div class="afk-need">${need}</div></div>` +
+				'<div class="afk-btns">' + lumpButton('up', i, '&#9650;', 'Move up') + lumpButton('down', i, '&#9660;', 'Move down') +
+				lumpButton('remove', i, '&#10005;', 'Remove') + '</div></div>';
+		});
+		const head = '<div class="afk-row afk-head"><div></div><div>#</div><div></div><div>Building</div>' +
+			'<div class="afk-stats"><div class="afk-cur">Now</div><div>Target</div><div>Status</div><div class="afk-need">Needed</div></div><div></div></div>';
+		const body = rows.length ? rows.join('') : '<div class="afk-empty">Empty, so nothing will be levelled. Drag a building here, or use Add below.</div>';
+		return `<div class="afk-list" id="afkLumpList">${head}${body}<div class="afk-drop-line" id="afkDropLine"></div></div>`;
 	}
 
 	function lumpPriorityHtml() {
-		const list = settings().lumpPriority;
-		const rows = list.map(function (entry, i) {
-			const level = Game.Objects[entry.building].level;
-			const progress = level >= entry.level ? 'done' : `now ${level}`;
-			return listing(`<label>${i + 1}. ${escapeHtml(entry.building)} to level ${entry.level} (${progress})</label> ` +
-				lumpButton('up', i, 'Up') + lumpButton('down', i, 'Down') + lumpButton('remove', i, 'Remove'));
-		});
-		if (!rows.length) rows.push(listing(note('empty, so nothing will be levelled')));
-
 		const draft = state.lumpDraft;
 		const options = Object.keys(Game.Objects).map(function (name) {
 			return `<option value="${escapeHtml(name)}"${name === draft.building ? ' selected' : ''}>${escapeHtml(name)}</option>`;
 		}).join('');
-		return listing('<label>Priority list, levelled from the top down:</label>') +
-			rows.join('') +
+		return listing('<label>Buildings: drag one into the list to add it (target = its level + 1). Dimmed ones aren\'t owned yet but can still be levelled.</label>') +
+			lumpPaletteHtml() +
+			listing('<label>Priority list, levelled from the top down. Drag &#8801; to reorder, or edit a target level in place.</label>') +
+			lumpListHtml() +
 			listing(`<label>Add</label> <select data-afk-lump-field="building" style="${FIELD_STYLE}">${options}</select>` +
 				`<label>to level</label> <input type="text" inputmode="numeric" data-afk-lump-field="level" ` +
 				`value="${escapeHtml(draft.level)}" style="width:50px;${FIELD_STYLE}">` +
@@ -1151,10 +1247,49 @@
 			'</div>';
 	}
 
+	// The data attribute that identifies a text field or dropdown, so it can be refocused after a re-render.
+	const FIELD_KEYS = ['afkNumber', 'afkLumpField', 'afkLumpTarget'];
+
+	function focusedFieldSelector() {
+		const el = document.activeElement;
+		if (!el || !el.dataset || !el.closest('#afkBakerMenu')) return '';
+		for (const key of FIELD_KEYS) {
+			if (el.dataset[key] === undefined) continue;
+			const attr = 'data-' + key.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); });
+			return `[${attr}="${el.dataset[key]}"]`;
+		}
+		return '';
+	}
+
+	// Below this width the list's columns don't fit on one line, so each row takes two.
+	const NARROW_LIST_PX = 390;
+	let listWidthObserver = null;
+
+	// Chromium 87 has no container queries; a single observer follows whichever list is current.
+	function watchLumpListWidth(list) {
+		if (!list || typeof ResizeObserver === 'undefined') return;
+		if (!listWidthObserver) {
+			listWidthObserver = new ResizeObserver(function (entries) {
+				for (const entry of entries) {
+					entry.target.classList.toggle('afk-narrow', entry.contentRect.width < NARROW_LIST_PX);
+				}
+			});
+		}
+		listWidthObserver.disconnect();
+		list.classList.toggle('afk-narrow', list.clientWidth < NARROW_LIST_PX);
+		listWidthObserver.observe(list);
+	}
+
 	function renderMenuSection() {
 		if (Game.onMenu !== 'prefs') return;
+		// Replacing the section mid-drag would drop the drag; it's redrawn when the drag ends.
+		if (state.drag) {
+			state.renderPending = true;
+			return;
+		}
 		const menu = document.getElementById('menu');
 		if (!menu) return;
+		const refocus = focusedFieldSelector();
 
 		const section = document.createElement('div');
 		section.id = 'afkBakerMenu';
@@ -1165,12 +1300,21 @@
 		section.addEventListener('change', onMenuChange);
 		section.addEventListener('input', onMenuInput);
 		section.addEventListener('keydown', onMenuKeyDown);
+		section.addEventListener('pointerdown', onDragPointerDown);
 
 		const existing = document.getElementById('afkBakerMenu');
 		if (existing) existing.replaceWith(section);
 		// The prefs menu ends with an empty spacer div; slot in just above it.
 		else if (menu.lastElementChild) menu.insertBefore(section, menu.lastElementChild);
 		else menu.appendChild(section);
+
+		watchLumpListWidth(section.querySelector('#afkLumpList'));
+
+		const field = refocus && section.querySelector(refocus);
+		if (field) {
+			field.focus();
+			if (field.tagName === 'INPUT') field.setSelectionRange(field.value.length, field.value.length);
+		}
 	}
 
 	function onMenuClick(event) {
@@ -1213,16 +1357,39 @@
 		}
 	}
 
-	// Keeps the Add row's building and level in state, so a menu rebuild doesn't lose them.
+	function lumpTargetEntry(input) {
+		return settings().lumpPriority[Number(input.dataset.afkLumpTarget)];
+	}
+
+	// Keeps the Add row's building and level in state, so a menu rebuild doesn't lose them. A row's
+	// target level is saved as soon as it's a valid whole number; anything else waits for the change event.
 	function onMenuInput(event) {
-		const field = event.target.dataset && event.target.dataset.afkLumpField;
-		if (field) state.lumpDraft[field] = event.target.value;
+		const dataset = event.target.dataset || {};
+		if (dataset.afkLumpField) state.lumpDraft[dataset.afkLumpField] = event.target.value;
+		if (dataset.afkLumpTarget !== undefined && /^\d+$/.test(event.target.value.trim())) {
+			const entry = lumpTargetEntry(event.target);
+			const level = clampInt(event.target.value, 1, MAX_TARGET_LEVEL, 1);
+			if (entry && level === Number(event.target.value.trim())) {
+				entry.level = level;
+				refreshStatusLine(Date.now(), true);
+			}
+		}
 	}
 
 	function onMenuChange(event) {
 		const input = event.target;
 		if (input.dataset && input.dataset.afkLumpField) {
 			onMenuInput(event);
+			return;
+		}
+		if (input.dataset && input.dataset.afkLumpTarget !== undefined) {
+			// Leaving the field or pressing Enter: clamp bad input, then redraw the row's status and needed lumps.
+			const entry = lumpTargetEntry(input);
+			if (entry) entry.level = clampInt(input.value, 1, MAX_TARGET_LEVEL, entry.level);
+			input.value = entry ? entry.level : input.value;
+			refreshStatusLine(Date.now(), true);
+			// After focus has moved on (Tab, Enter, a click), so the redraw keeps whatever is focused then.
+			setTimeout(renderMenuSection, 0);
 			return;
 		}
 		const key = input.dataset && input.dataset.afkNumber;
@@ -1244,13 +1411,206 @@
 
 	function onMenuKeyDown(event) {
 		if (event.key !== 'Enter' || !event.target.dataset) return;
-		if (event.target.dataset.afkNumber) {
+		if (event.target.dataset.afkNumber || event.target.dataset.afkLumpTarget !== undefined) {
 			event.target.blur();
 		} else if (event.target.dataset.afkLumpField === 'level') {
 			// Enter in the Add row's level field adds the entry, like clicking Add.
 			state.lumpDraft.level = event.target.value;
 			editLumpPriority('add', -1);
 			PlaySound('snd/tick.mp3');
+			renderMenuSection();
+		}
+	}
+
+	/* ---------------------------------------------------------------------
+	   Drag and drop in the lump priority list. Pointer events are used, not HTML5 drag and drop: they
+	   work the same with mouse, pen and touch, the drop line and ghost are fully under our control, and
+	   they don't fire the game's document mousedown/mouseup handlers.
+	   --------------------------------------------------------------------- */
+
+	const DRAG_THRESHOLD_PX = 4;
+	const AUTOSCROLL_EDGE_PX = 40;
+	const AUTOSCROLL_STEP_PX = 14;
+	const AUTOSCROLL_INTERVAL_MS = 30;
+
+	function onDragPointerDown(event) {
+		const source = event.target.closest('[data-afk-drag]');
+		if (!source || event.button !== 0 || state.drag) return;
+		// No text selection, and no mousedown for the game's own handlers.
+		event.preventDefault();
+		event.stopPropagation();
+		const kind = source.dataset.afkDrag;
+		const index = Number(source.dataset.index);
+		const entry = kind === 'row' ? settings().lumpPriority[index] : null;
+		const building = kind === 'row' ? entry && entry.building : source.dataset.building;
+		if (!hasKey(Game.Objects, building)) return;
+		state.drag = {
+			kind: kind, index: index, building: building, pointerId: event.pointerId,
+			startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY,
+			active: false, slot: -1, ghost: null, scroller: null, scrollTimer: 0,
+		};
+		try {
+			source.setPointerCapture(event.pointerId);
+		} catch (e) {
+			// Capture only keeps events coming when the pointer leaves the window; the window listeners still work.
+		}
+		window.addEventListener('pointermove', onDragPointerMove, true);
+		window.addEventListener('pointerup', onDragPointerUp, true);
+		window.addEventListener('pointercancel', onDragPointerCancel, true);
+		window.addEventListener('keydown', onDragKeyDown, true);
+	}
+
+	function onDragPointerMove(event) {
+		const drag = state.drag;
+		if (!drag || event.pointerId !== drag.pointerId) return;
+		event.preventDefault();
+		drag.x = event.clientX;
+		drag.y = event.clientY;
+		if (!drag.active) {
+			if (Math.abs(drag.x - drag.startX) + Math.abs(drag.y - drag.startY) < DRAG_THRESHOLD_PX) return;
+			beginDrag(drag);
+		}
+		updateDrag(drag);
+	}
+
+	function beginDrag(drag) {
+		drag.active = true;
+		const ghost = document.createElement('div');
+		ghost.className = 'afk-ghost smallFramed';
+		ghost.innerHTML = buildingIconHtml(Game.Objects[drag.building]) + escapeHtml(drag.building);
+		document.body.appendChild(ghost);
+		drag.ghost = ghost;
+		document.body.classList.add('afk-dragging');
+		if (drag.kind === 'row') {
+			const row = document.querySelector(`#afkBakerMenu [data-afk-row="${drag.index}"]`);
+			if (row) row.classList.add('afk-drag-source');
+		}
+		drag.scroller = scrollParent(document.getElementById('afkBakerMenu'));
+		drag.scrollTimer = setInterval(autoScrollDuringDrag, AUTOSCROLL_INTERVAL_MS);
+	}
+
+	function scrollParent(el) {
+		for (let node = el && el.parentElement; node; node = node.parentElement) {
+			const overflow = getComputedStyle(node).overflowY;
+			if ((overflow === 'auto' || overflow === 'scroll') && node.scrollHeight > node.clientHeight) return node;
+		}
+		return null;
+	}
+
+	// Scrolls the Options menu while the pointer is held near its top or bottom edge.
+	function autoScrollDuringDrag() {
+		const drag = state.drag;
+		if (!drag || !drag.scroller) return;
+		const box = drag.scroller.getBoundingClientRect();
+		let delta = 0;
+		if (drag.y < box.top + AUTOSCROLL_EDGE_PX) delta = -AUTOSCROLL_STEP_PX;
+		else if (drag.y > box.bottom - AUTOSCROLL_EDGE_PX) delta = AUTOSCROLL_STEP_PX;
+		if (!delta) return;
+		drag.scroller.scrollTop += delta;
+		updateDrag(drag);
+	}
+
+	// The slot the item would be inserted at (0 = above the first row), or -1 if the pointer isn't over
+	// the list or a row would land where it already is.
+	function dropSlot(drag) {
+		const list = document.getElementById('afkLumpList');
+		if (!list) return -1;
+		const box = list.getBoundingClientRect();
+		const margin = 16;
+		if (drag.x < box.left - margin || drag.x > box.right + margin || drag.y < box.top - margin || drag.y > box.bottom + margin) return -1;
+		const rows = list.querySelectorAll('[data-afk-row]');
+		let slot = rows.length;
+		for (let i = 0; i < rows.length; i++) {
+			const rect = rows[i].getBoundingClientRect();
+			if (drag.y < rect.top + rect.height / 2) {
+				slot = i;
+				break;
+			}
+		}
+		if (drag.kind === 'row' && (slot === drag.index || slot === drag.index + 1)) return -1;
+		return slot;
+	}
+
+	function updateDrag(drag) {
+		drag.ghost.style.transform = `translate(${drag.x + 14}px, ${drag.y + 10}px)`;
+		drag.slot = dropSlot(drag);
+		const line = document.getElementById('afkDropLine');
+		const list = document.getElementById('afkLumpList');
+		if (!line || !list) return;
+		if (drag.slot < 0) {
+			line.style.display = 'none';
+			return;
+		}
+		const rows = list.querySelectorAll('[data-afk-row]');
+		let top;
+		if (drag.slot < rows.length) top = rows[drag.slot].offsetTop;
+		else if (rows.length) top = rows[rows.length - 1].offsetTop + rows[rows.length - 1].offsetHeight;
+		else top = list.querySelector('.afk-head').offsetHeight;
+		line.style.top = top + 'px';
+		line.style.display = 'block';
+	}
+
+	function onDragPointerUp(event) {
+		const drag = state.drag;
+		if (!drag || event.pointerId !== drag.pointerId) return;
+		event.preventDefault();
+		event.stopPropagation();
+		if (drag.active) {
+			// The release can land anywhere, the big cookie included; the click that follows must not reach the game.
+			swallowNextClick();
+			if (drag.slot >= 0) applyDrop(drag);
+		}
+		endDrag();
+	}
+
+	function onDragPointerCancel(event) {
+		if (state.drag && event.pointerId === state.drag.pointerId) endDrag();
+	}
+
+	function onDragKeyDown(event) {
+		if (event.key !== 'Escape' || !state.drag) return;
+		// Escape cancels the drag only; the game's own Escape handling doesn't see it.
+		event.preventDefault();
+		event.stopPropagation();
+		if (state.drag.active) swallowNextClick();
+		endDrag();
+	}
+
+	function swallowNextClick() {
+		const swallow = function (event) {
+			event.stopPropagation();
+			event.preventDefault();
+		};
+		window.addEventListener('click', swallow, true);
+		setTimeout(function () { window.removeEventListener('click', swallow, true); }, 0);
+	}
+
+	function applyDrop(drag) {
+		const list = settings().lumpPriority;
+		if (drag.kind === 'row') {
+			const moved = list.splice(drag.index, 1)[0];
+			list.splice(drag.slot > drag.index ? drag.slot - 1 : drag.slot, 0, moved);
+		} else if (list.length < MAX_PRIORITY_ENTRIES) {
+			const level = Math.min(MAX_TARGET_LEVEL, Game.Objects[drag.building].level + 1);
+			list.splice(drag.slot, 0, { building: drag.building, level: level });
+		}
+		PlaySound('snd/tick.mp3');
+	}
+
+	function endDrag() {
+		const drag = state.drag;
+		if (!drag) return;
+		window.removeEventListener('pointermove', onDragPointerMove, true);
+		window.removeEventListener('pointerup', onDragPointerUp, true);
+		window.removeEventListener('pointercancel', onDragPointerCancel, true);
+		window.removeEventListener('keydown', onDragKeyDown, true);
+		clearInterval(drag.scrollTimer);
+		if (drag.ghost) drag.ghost.remove();
+		document.body.classList.remove('afk-dragging');
+		const wasActive = drag.active;
+		state.drag = null;
+		if (wasActive || state.renderPending) {
+			state.renderPending = false;
 			renderMenuSection();
 		}
 	}
