@@ -1,6 +1,6 @@
 # AFK Baker
 
-A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building (1, 10 or 100 at a time) or upgrade according to [Cookie Monster](https://steamcommunity.com/sharedfiles/filedetails/?id=2685721341), harvests and spends sugar lumps, and ascends when you reach a prestige goal.
+A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building (1, 10 or 100 at a time) or upgrade according to [Cookie Monster](https://steamcommunity.com/sharedfiles/filedetails/?id=2685721341), harvests and spends sugar lumps, trains Krumblor the dragon, and ascends when you reach a prestige goal.
 
 It uses only the game's built-in mod API (`Game.registerMod`). CCSE is not needed.
 
@@ -25,7 +25,7 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
 **Auto-buy**
 - Picks the item with the lowest payback period (PP) according to Cookie Monster: any upgrade, or 1, 10 or 100 of any building. A bundle of 10 or 100 is bought in one purchase through the game's own bulk buy. The store's Buy/Sell mode and bulk setting are left as you had them. If it can't afford the best item yet, it waits and saves up rather than buying something worse.
 - While it's waiting it checks about once a second. After each purchase it buys again as soon as Cookie Monster has recalculated (about 15 purchases a second when there's a lot to buy), and it never buys twice using the same out-of-date data.
-- **Mute auto-buy purchase sounds** (on by default): AFK Baker's own purchases and building level-ups are silent. Your manual purchases, golden cookies and every other sound play as normal, and the volume isn't changed.
+- **Mute auto-buy purchase sounds** (on by default): AFK Baker's own purchases, building level-ups, dragon training and dragon petting are silent. Your manual purchases, golden cookies and every other sound play as normal, and the volume isn't changed.
 - If the best item can't be bought at all (the purchase fails, the game refuses it, or Cookie Monster's price for it stays out of date), it skips that item for a minute and moves on to the next best.
 - **Cookie reserve**: how many cookies to keep banked. Lucky and Lucky + Frenzy are the bank sizes needed for a full Lucky payout.
   - **Off** (default): no reserve. Updating from 1.2 or earlier switches the reserve to Off once. After that, your choice is kept.
@@ -81,10 +81,39 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
   - The default list only unlocks the minigames: Farm 1 (Garden), Temple 1 (Pantheon), Wizard tower 1 (Grimoire), Bank 1 (Stock Market). Add anything else yourself.
   - The list is saved with your other settings. If the saved list is damaged, the default list is used instead.
 
+**Krumblor the dragon**
+
+**The dragon resets every ascension.** That's how the game works: its level, both auras, the crumbly egg and the four dragon drops all go back to nothing each time you ascend. AFK Baker retrains the dragon, sets your auras again and pets for the drops again on every run.
+
+- **Auto-train dragon** (off by default):
+  - Buys **A crumbly egg** (25 cookies) when the game offers it. The egg only appears if you own the heavenly upgrade "How to bake your dragon" and have baked 1 million cookies this run.
+  - Trains level by level with the game's own training function and costs:
+
+    | Dragon level | Cost |
+    |---|---|
+    | 1 to 5 | 1, 2, 4, 8 and 16 million cookies |
+    | 6 to 25 | sacrifice 100 of one building each, in store order from Cursor to You |
+    | 26 | sacrifice 50 of every building |
+    | 27 (fully trained, second aura) | sacrifice 200 of every building |
+
+  - **Cookie steps** are bought when affordable, respecting the cookie reserve.
+  - **Sacrifice steps** are only done when they're cheap. A sacrifice refunds nothing, so the mod adds up the cost of buying any buildings you're still missing plus rebuying everything sacrificed, and only goes ahead when that total is less than **N minutes of your CpS** (default 10, using unbuffed CpS so a Frenzy doesn't trigger it).
+  - If a step is cheap enough but you're short on buildings, it buys the missing ones first (respecting the reserve), then sacrifices. Afterwards, auto-buy rebuilds as usual.
+  - It never trains during the ascend animation or on the ascension screen.
+- **Auras**: two dropdowns, primary and secondary. The default is None, and the mod doesn't touch an aura slot until you pick one for it.
+  - Every aura can be picked. Ones the dragon hasn't unlocked yet are greyed with the level they unlock at, and are set as soon as the dragon gets there. Your picks are kept across ascensions.
+  - The secondary aura is only used once the dragon is fully trained.
+  - Setting an aura costs **one of your highest-tier building** (the game's rule), so the mod only changes an aura when your pick isn't active. Slot order makes no difference in the game, so a pick that's already in either slot is left where it is, and auras are never swapped back and forth. The same aura can't be picked twice.
+- **Auto-pet dragon** (off by default): needs the heavenly upgrade "Pet the dragon" and a dragon at level 8 or more.
+  - Which drop you can get depends on the quarter of the hour, so finding all four takes up to about 45 minutes. The mod pets only during a quarter whose drop is still missing, and stops for good once all four are found.
+  - The game only allows petting with the dragon panel open, so the mod opens it while it pets (usually a few seconds), then puts back whatever you had open before: Santa's panel, the dragon's, or nothing. Training does the same.
+  - Dragon fang and Dragon teddy bear have no payback period, so auto-pet buys those two itself, respecting the cookie reserve. Dragon scale and Dragon claw are left to auto-buy.
+
 **Auto-ascend**
 - The threshold is either **prestige gained this run** or **total prestige level after ascending**. It uses the same numbers as the game's Legacy button.
 - When you reach it, the mod ascends. It never reincarnates, so you choose your heavenly upgrades yourself.
 - It is **off** by default. The default threshold is 1,000 prestige gained.
+- The threshold box takes plain digits (commas are fine) or scientific notation such as `1.146e15`, and is wide enough for 20 digits. Next to it, the mod shows the value in the game's own number format (for example `= 1.146 quadrillion`) so you can check you typed the right number of digits. Something that isn't a number keeps the old threshold.
 - **Safety guard**: auto-ascend only fires when you cross the threshold during play. If the threshold is already reached when the mod loads, when you turn auto-ascend on, or when you change the threshold, type or wrinkler mode, the mod shows a warning instead of ascending. To confirm, toggle auto-ascend off and on again.
 
 **Other**
@@ -99,6 +128,7 @@ The Options section also shows a live status line:
 - how many wrinklers are feeding, and how many cookies they would pay out
 - sugar lumps owned, the time until the current lump is ripe, and the last harvest
 - the next lump spend and how many lumps it still needs, the lumps needed to finish the whole priority list, and the last level-up, e.g. `Next: Wizard tower to level 3, 2 more lumps needed. 9 lumps to finish the list`
+- the dragon's level and auras, and the next training step with its cost and what it's waiting for, e.g. `Next: sacrifice 100 Farms (rebuy cost 14 min of CpS, waiting for under 10 min)`; with auto-pet on, how many drops are found and which one it's waiting for
 - your progress toward the ascend threshold, plus the guard warning when it's active
 
 ## Requirements

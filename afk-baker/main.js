@@ -7,7 +7,7 @@
 	'use strict';
 
 	const MOD_ID = 'afk baker';
-	const VERSION = '1.6.0';
+	const VERSION = '1.7.0';
 	// Settings saved before a default changed are reset to the new default:
 	// v1 had auto-ascend on, v2 had Elder Pledge on, v3 had the Auto reserve.
 	const SETTINGS_VERSION = 4;
@@ -71,6 +71,18 @@
 		{ building: 'Wizard tower', level: 1 },
 		{ building: 'Bank', level: 1 },
 	];
+	const DRAGON_CHECK_INTERVAL_MS = 1000;
+	const MAX_DRAGON_TRAIN_MINUTES = 1000000;
+	// Game.UpgradeDragon plays shimmerClick; Game.ClickSpecialPic (petting) plays a click and a growl.
+	const DRAGON_SOUND = /^snd\/(shimmerClick|click\d|growl)\.mp3$/;
+	const PET_INTERVAL_MS = 100;
+	// A pet has a 1 in 20 chance of a drop, so this many pets without one means the drop isn't coming.
+	const MAX_PETS_PER_WINDOW = 400;
+	const DRAGON_DROPS = ['Dragon scale', 'Dragon claw', 'Dragon fang', 'Dragon teddy bear'];
+	// These two have no CpS or click effect, so the PP buyer never picks them; auto-pet buys them itself.
+	const DRAGON_DROPS_WITHOUT_PP = ['Dragon fang', 'Dragon teddy bear'];
+	// Prestige can pass 2^53, so the threshold is a plain number, not a safe integer.
+	const MAX_ASCEND_THRESHOLD = 1e300;
 	const REINCARNATE_GRACE_MS = 3000;
 	const STATUS_REFRESH_MS = 500;
 
@@ -92,6 +104,12 @@
 		autoHarvestLumps: true,
 		autoSpendLumps: false,
 		keepLumps: 0,
+		autoTrainDragon: false,
+		dragonTrainMinutes: 10,
+		// Aura names as in Game.dragonAuras; '' means the mod leaves that slot alone.
+		dragonAura1: '',
+		dragonAura2: '',
+		autoPetDragon: false,
 		autoAscend: false,
 		ascendMode: 'gained',
 		ascendThreshold: 1000,
@@ -125,6 +143,24 @@
 		return raw.map(function (entry) { return { building: entry.building, level: entry.level }; });
 	}
 
+	// Accepts plain digits, commas or spaces as separators, and scientific notation such as 1.146e15.
+	// Returns NaN for anything else.
+	function parseBigNumber(text) {
+		const cleaned = String(text).replace(/[,\s_]/g, '');
+		if (!/^(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(cleaned)) return NaN;
+		return Number(cleaned);
+	}
+
+	function sanitizeThreshold(value, fallback) {
+		const n = Math.floor(typeof value === 'number' ? value : parseBigNumber(value));
+		if (!Number.isFinite(n)) return fallback;
+		return Math.min(MAX_ASCEND_THRESHOLD, Math.max(1, n));
+	}
+
+	function isAuraName(name) {
+		return hasKey(Game.dragonAurasBN, name) && Game.dragonAurasBN[name].id > 0;
+	}
+
 	function sanitizeSettings(raw) {
 		const settings = Object.assign({}, DEFAULTS);
 		settings.lumpPriority = sanitizeLumpPriority(raw && raw.lumpPriority);
@@ -138,8 +174,11 @@
 		}
 		settings.clickRate = clampInt(raw.clickRate, 0, MAX_CLICK_RATE, DEFAULTS.clickRate);
 		settings.autoReserveMinutes = clampInt(raw.autoReserveMinutes, 0, MAX_AUTO_RESERVE_MINUTES, DEFAULTS.autoReserveMinutes);
-		settings.ascendThreshold = clampInt(raw.ascendThreshold, 1, Number.MAX_SAFE_INTEGER, DEFAULTS.ascendThreshold);
+		settings.ascendThreshold = sanitizeThreshold(raw.ascendThreshold, DEFAULTS.ascendThreshold);
 		settings.keepLumps = clampInt(raw.keepLumps, 0, MAX_KEEP_LUMPS, DEFAULTS.keepLumps);
+		settings.dragonTrainMinutes = clampInt(raw.dragonTrainMinutes, 0, MAX_DRAGON_TRAIN_MINUTES, DEFAULTS.dragonTrainMinutes);
+		if (isAuraName(raw.dragonAura1)) settings.dragonAura1 = raw.dragonAura1;
+		if (isAuraName(raw.dragonAura2) && raw.dragonAura2 !== settings.dragonAura1) settings.dragonAura2 = raw.dragonAura2;
 		const savedVersion = Number(raw.settingsVersion) || 1;
 		if (savedVersion < 2) settings.autoAscend = DEFAULTS.autoAscend;
 		if (savedVersion < 3) settings.elderPledge = DEFAULTS.elderPledge;
@@ -171,6 +210,13 @@
 		lumpDraft: { building: DEFAULT_LUMP_PRIORITY[0].building, level: '1' },
 		drag: null, // a drag in the lump priority list, from pointerdown until it ends
 		renderPending: false,
+		nextDragonCheckAt: 0,
+		nextPetAt: 0,
+		lastDragonAction: '',
+		// While petting: the special panel to put back afterwards, and how many pets this window has had.
+		petSession: null,
+		petGivenUpWindow: '',
+		dropOrder: { seed: null, order: [] },
 		ascendTriggered: false,
 		// Set when the threshold was already met at load or by a settings change; cleared by re-arming.
 		ascendWarning: false,
@@ -242,6 +288,7 @@
 			if (s.clickFortunes) clickFortune();
 			runAutoBuy(now);
 			runLumps(now);
+			runDragon(now);
 			checkAutoAscend();
 			refreshStatusLine(now);
 		} catch (e) {
@@ -256,6 +303,7 @@
 		// Cookie Monster's data still describes the previous run for a moment.
 		state.buyResumeAt = Date.now() + REINCARNATE_GRACE_MS;
 		state.skipUntil = {};
+		forgetDragonRun();
 	}
 
 	function onReset() {
@@ -263,6 +311,14 @@
 		state.ascendWarning = false;
 		state.buyResumeAt = Date.now() + REINCARNATE_GRACE_MS;
 		state.skipUntil = {};
+		forgetDragonRun();
+	}
+
+	// The game has already reset the dragon and closed the special panel, so there's nothing to put back.
+	function forgetDragonRun() {
+		state.petSession = null;
+		state.petGivenUpWindow = '';
+		state.lastDragonAction = '';
 	}
 
 	/* =====================================================================
@@ -472,21 +528,32 @@
 		state.refreshesSinceBuy++;
 	}
 
-	// Runs one of our own purchases or level-ups with its sound suppressed. PlaySound is a global the game looks up
-	// on every call, so swapping it only for the length of this call leaves the player's purchases,
-	// golden cookies and every other sound alone.
-	function withPurchaseSoundMuted(purchase) {
-		if (!settings().muteBuySounds) return purchase();
+	// Runs one of our own actions with the sounds matching `pattern` suppressed. PlaySound is a global the
+	// game looks up on every call, so swapping it only for the length of this call leaves the player's
+	// own purchases, golden cookies and every other sound alone.
+	function withSoundsMuted(pattern, action) {
+		if (!settings().muteBuySounds) return action();
 		const originalPlaySound = window.PlaySound;
 		window.PlaySound = function (url) {
-			if (typeof url === 'string' && PURCHASE_SOUND.test(url)) return 0;
+			if (typeof url === 'string' && pattern.test(url)) return 0;
 			return originalPlaySound.apply(this, arguments);
 		};
 		try {
-			return purchase();
+			return action();
 		} finally {
 			window.PlaySound = originalPlaySound;
 		}
+	}
+
+	function withPurchaseSoundMuted(purchase) {
+		return withSoundsMuted(PURCHASE_SOUND, purchase);
+	}
+
+	// Anything of ours that changes buildings or CpS outside the PP buyer: make the buyer wait for
+	// Cookie Monster to catch up, then carry on straight away.
+	function noteGameChanged() {
+		state.refreshesSinceBuy = 0;
+		state.buyAgain = true;
 	}
 
 	function tryBuyUpgrade(upgrade) {
@@ -906,6 +973,298 @@
 	}
 
 	/* =====================================================================
+	   KRUMBLOR (DRAGON)
+	   The dragon's level, its auras and its drops all reset on every ascension (Game.Reset), so
+	   everything here starts over each run.
+	   ===================================================================== */
+
+	function hasDragonEgg() {
+		return !!Game.Has('A crumbly egg');
+	}
+
+	function dragonMaxLevel() {
+		return Game.dragonLevels.length - 1;
+	}
+
+	// What the next training step asks for, mirroring Game.dragonLevels in main.js: levels 0 to 4 cost
+	// cookies (1 million, doubling each level), the next ones 100 of one building each in store order,
+	// and the last two 50 and then 200 of every building. Game.UpgradeDragon still runs the game's own
+	// check before anything is spent, so a mismatch here can only make the mod wait.
+	function dragonStep() {
+		const level = Game.dragonLevel;
+		const max = dragonMaxLevel();
+		if (level >= max) return null;
+		if (level <= 4) return { cookies: 1000000 * Math.pow(2, level), buildings: [], everyBuilding: 0 };
+		if (level <= max - 3) {
+			return { cookies: 0, buildings: [{ building: Game.ObjectsById[level - 5], amount: 100 }], everyBuilding: 0 };
+		}
+		const amount = level === max - 2 ? 50 : 200;
+		const buildings = Object.keys(Game.Objects).map(function (name) {
+			return { building: Game.Objects[name], amount: amount };
+		});
+		return { cookies: 0, buildings: buildings, everyBuilding: amount };
+	}
+
+	// The price of taking a building from `from` owned to `to` owned. Game.Object.getSumPrice does the
+	// same sum, but only starting from the current amount.
+	function buildingRangePrice(building, from, to) {
+		let sum = 0;
+		for (let i = Math.max(0, from); i < Math.max(0, to); i++) {
+			sum += building.basePrice * Math.pow(Game.priceIncrease, Math.max(0, i - building.free));
+		}
+		return Math.ceil(Game.modifyBuildingPrice(building, sum));
+	}
+
+	// What a sacrifice step costs in cookies: buying the buildings still missing, then buying back
+	// everything that was sacrificed. A sacrifice refunds nothing.
+	function sacrificePlan(step) {
+		const plan = { missing: [], missingCost: 0, rebuyCost: 0, total: 0 };
+		for (const need of step.buildings) {
+			const owned = need.building.amount;
+			const short = Math.max(0, need.amount - owned);
+			if (short > 0) {
+				const cost = buildingRangePrice(need.building, owned, owned + short);
+				plan.missing.push({ building: need.building, amount: short, cost: cost });
+				plan.missingCost += cost;
+			}
+			const left = owned + short - need.amount;
+			plan.rebuyCost += buildingRangePrice(need.building, left, left + need.amount);
+		}
+		plan.total = plan.missingCost + plan.rebuyCost;
+		return plan;
+	}
+
+	// Unbuffed, so a Frenzy doesn't trigger a sacrifice that is then rebuilt at normal speed.
+	function isCheapSacrifice(plan) {
+		return plan.total < settings().dragonTrainMinutes * 60 * Game.unbuffedCps;
+	}
+
+	// 'dragon', 'santa', or '' for closed. ToggleSpecialMenu(0) only closes while a tab is selected.
+	function showSpecialPanel(tab) {
+		if (tab) {
+			Game.specialTab = tab;
+			Game.ToggleSpecialMenu(1);
+		} else {
+			if (!Game.specialTab) Game.specialTab = 'dragon';
+			Game.ToggleSpecialMenu(0);
+		}
+	}
+
+	// Game.UpgradeDragon ends with Game.ToggleSpecialMenu(1), which shows the special panel even if it
+	// was closed. Afterwards, put back whatever the player had open: the dragon, Santa, or nothing.
+	function withSpecialPanelRestored(action) {
+		const tab = Game.specialTab;
+		try {
+			return action();
+		} finally {
+			showSpecialPanel(tab);
+		}
+	}
+
+	function upgradeDragon() {
+		const levelBefore = Game.dragonLevel;
+		withSpecialPanelRestored(function () {
+			withSoundsMuted(DRAGON_SOUND, function () { Game.UpgradeDragon(); });
+		});
+		if (Game.dragonLevel <= levelBefore) return false;
+		state.lastDragonAction = `Trained the dragon to level ${Game.dragonLevel}`;
+		debugLog(state.lastDragonAction);
+		return true;
+	}
+
+	function buyDragonEgg() {
+		const egg = Game.Upgrades['A crumbly egg'];
+		return isInStore(egg) && isAllowedUpgrade(egg) && tryBuyUpgrade(egg);
+	}
+
+	// One training action per call: the egg, a cookie step, missing buildings for a cheap sacrifice,
+	// or the sacrifice itself. Returns true if anything was bought or sacrificed.
+	function trainDragon() {
+		if (!hasDragonEgg()) return buyDragonEgg();
+		const step = dragonStep();
+		if (!step) return false;
+		if (step.cookies > 0) return canAfford(step.cookies) && upgradeDragon();
+
+		const plan = sacrificePlan(step);
+		if (!isCheapSacrifice(plan)) return false;
+		if (plan.missing.length) {
+			const short = plan.missing[0];
+			// The same rounding allowance as purchaseCost: buy() charges each building's rounded-up price.
+			return canAfford(short.cost + short.amount - 1) && buyBuilding(short.building.name, short.amount);
+		}
+		return upgradeDragon();
+	}
+
+	function auraId(name) {
+		return isAuraName(name) ? Game.dragonAurasBN[name].id : 0;
+	}
+
+	// Game.SelectDragonAura offers aura number n once the dragon is level n + 4.
+	function auraUnlockLevel(id) {
+		return id + 4;
+	}
+
+	// The second slot comes with the last training step (a fully trained dragon).
+	function hasSecondAuraSlot() {
+		return Game.dragonLevel >= dragonMaxLevel();
+	}
+
+	// The game has no function for setting an aura. Its picker, Game.SelectDragonAura in main.js, is a
+	// prompt whose Confirm button runs this as inline code:
+	//     Game.dragonAura (or Game.dragonAura2) = the picked aura;
+	//     sacrifice 1 of the highest-tier building owned, unless none are owned or the aura is unchanged;
+	//     Game.ToggleSpecialMenu(1); Game.ClosePrompt();
+	// This does the same without the prompt. If a game update changes that button, change this to match.
+	function setDragonAura(slot, id) {
+		const current = slot === 0 ? Game.dragonAura : Game.dragonAura2;
+		if (current === id) return;
+		let highestBuilding = null;
+		for (const name in Game.Objects) {
+			if (Game.Objects[name].amount > 0) highestBuilding = Game.Objects[name];
+		}
+		if (slot === 0) Game.dragonAura = id;
+		else Game.dragonAura2 = id;
+		if (highestBuilding) highestBuilding.sacrifice(1);
+		// The button redraws the dragon panel it was opened from; only do that if the panel is showing.
+		if (Game.specialTab === 'dragon') Game.ToggleSpecialMenu(1);
+		Game.recalculateGains = 1;
+		state.lastDragonAction = `Set aura ${Game.dragonAuras[id].name}` +
+			(highestBuilding ? ` (cost 1 ${highestBuilding.name})` : ' (free, no buildings owned)');
+		debugLog(state.lastDragonAction);
+	}
+
+	// The picked auras that can be set right now: unlocked, and the secondary only with two slots.
+	function wantedAuras() {
+		const s = settings();
+		const picks = [auraId(s.dragonAura1), hasSecondAuraSlot() ? auraId(s.dragonAura2) : 0];
+		return picks.map(function (id) { return id > 0 && Game.dragonLevel >= auraUnlockLevel(id) ? id : 0; });
+	}
+
+	// Slot order makes no difference in the game (Game.hasAura and Game.auraMult check both slots), so a
+	// pick only has to be present in either slot. It's never moved from one slot to the other, and an
+	// aura is only changed when a pick is missing. Returns true if an aura was changed.
+	function applyDragonAuras() {
+		if (!hasDragonEgg()) return false;
+		const wanted = wantedAuras();
+		const current = [Game.dragonAura, hasSecondAuraSlot() ? Game.dragonAura2 : -1];
+		for (let slot = 0; slot < wanted.length; slot++) {
+			const id = wanted[slot];
+			if (!id || current.indexOf(id) !== -1) continue;
+			// Its own slot, unless that one already holds the other pick.
+			const other = 1 - slot;
+			const target = current[slot] === wanted[other] && wanted[other] ? other : slot;
+			if (target === 1 && !hasSecondAuraSlot()) continue;
+			setDragonAura(target, id);
+			return true;
+		}
+		return false;
+	}
+
+	function isDropFound(name) {
+		return !!(Game.Has(name) || Game.HasUnlocked(name));
+	}
+
+	// Game.ClickSpecialPic only drops something for a hatched dragon at level 8 or more, with the
+	// heavenly upgrade "Pet the dragon".
+	function canPetForDrops() {
+		return hasDragonEgg() && !!Game.Has('Pet the dragon') && Game.dragonLevel >= 8;
+	}
+
+	// Which drop each quarter of the hour gives. Mirrors Game.ClickSpecialPic: the four drops are
+	// shuffled with the run's seed, then picked by the current minute.
+	function dragonDropOrder() {
+		if (state.dropOrder.seed !== Game.seed) {
+			Math.seedrandom(Game.seed + '/dragonTime');
+			const order = shuffle(DRAGON_DROPS.slice());
+			Math.seedrandom();
+			state.dropOrder = { seed: Game.seed, order: order };
+		}
+		return state.dropOrder.order;
+	}
+
+	function dropWindow(date) {
+		const index = Math.floor((date.getMinutes() / 60) * DRAGON_DROPS.length);
+		return { key: `${date.getHours()}:${index}`, index: index, drop: dragonDropOrder()[index] };
+	}
+
+	function petDragon() {
+		// Each pet throws a particle from the mouse pointer; leave that out for our own pets.
+		const savedParticles = Game.prefs.particles;
+		Game.prefs.particles = 0;
+		try {
+			withSoundsMuted(DRAGON_SOUND, function () { Game.ClickSpecialPic(); });
+		} finally {
+			Game.prefs.particles = savedParticles;
+		}
+	}
+
+	function endPetSession() {
+		const session = state.petSession;
+		if (!session) return;
+		state.petSession = null;
+		if (session.restoreTab !== Game.specialTab) showSpecialPanel(session.restoreTab);
+	}
+
+	// Petting only works with the dragon panel open (Game.ClickSpecialPic checks for it), so the panel
+	// is opened for as long as the current quarter-hour's drop is still missing, then the panel the
+	// player had open before is put back.
+	function runAutoPet(now) {
+		if (now < state.nextPetAt) return;
+		state.nextPetAt = now + PET_INTERVAL_MS;
+		if (!settings().autoPetDragon || !canPetForDrops()) {
+			endPetSession();
+			return;
+		}
+		const current = dropWindow(new Date(now));
+		if (isDropFound(current.drop) || state.petGivenUpWindow === current.key) {
+			endPetSession();
+			return;
+		}
+
+		let session = state.petSession;
+		if (!session) {
+			session = state.petSession = { restoreTab: Game.specialTab, windowKey: current.key, pets: 0 };
+		} else if (Game.specialTab !== 'dragon') {
+			// The player switched panels during the session; that's the one to put back.
+			session.restoreTab = Game.specialTab;
+		}
+		if (session.windowKey !== current.key) {
+			session.windowKey = current.key;
+			session.pets = 0;
+		}
+		if (Game.specialTab !== 'dragon' || !document.getElementById('specialPic')) showSpecialPanel('dragon');
+		petDragon();
+		session.pets++;
+		if (isDropFound(current.drop)) {
+			state.lastDragonAction = `The dragon dropped ${current.drop}`;
+			debugLog(state.lastDragonAction);
+		} else if (session.pets >= MAX_PETS_PER_WINDOW) {
+			state.petGivenUpWindow = current.key;
+		}
+	}
+
+	// Dragon scale and Dragon claw have a PP and are left to the PP buyer.
+	function buyDragonDrops() {
+		for (const name of DRAGON_DROPS_WITHOUT_PP) {
+			const upgrade = Game.Upgrades[name];
+			if (isInStore(upgrade) && isAllowedUpgrade(upgrade) && tryBuyUpgrade(upgrade)) return true;
+		}
+		return false;
+	}
+
+	function runDragon(now) {
+		runAutoPet(now);
+		if (now < state.nextDragonCheckAt) return;
+		state.nextDragonCheckAt = now + DRAGON_CHECK_INTERVAL_MS;
+		if (now < state.buyResumeAt) return;
+		const s = settings();
+		const changed = (s.autoTrainDragon && trainDragon()) ||
+			applyDragonAuras() ||
+			(s.autoPetDragon && buyDragonDrops());
+		if (changed) noteGameChanged();
+	}
+
+	/* =====================================================================
 	   AUTO-ASCEND
 	   ===================================================================== */
 
@@ -1000,7 +1359,8 @@
 		return `<a class="smallFancyButton option" data-afk-cycle="${key}">${label}: ${value}</a>`;
 	}
 
-	const FIELD_STYLE = 'background:#000;color:#ccc;border:1px solid #ccc;padding:3px 6px;font-size:12px;margin:2px 4px 2px 0px;';
+	// max-width keeps wide fields (aura dropdowns, the threshold box) inside a narrow Options column.
+	const FIELD_STYLE = 'background:#000;color:#ccc;border:1px solid #ccc;padding:3px 6px;font-size:12px;margin:2px 4px 2px 0px;max-width:calc(100% - 20px);';
 
 	// Layout for the lump priority list. Borders, fonts and buttons come from the game's own classes
 	// (smallFramed, smallFancyButton, option, tinyProductIcon). The game runs Electron 11 (Chromium 87),
@@ -1048,9 +1408,33 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		document.head.appendChild(style);
 	}
 
-	function numberInput(key) {
+	function numberInput(key, width) {
 		return `<input type="text" inputmode="numeric" data-afk-number="${key}" value="${settings()[key]}" ` +
-			`style="width:90px;${FIELD_STYLE}">`;
+			`style="width:${width || 90}px;${FIELD_STYLE}">`;
+	}
+
+	// The threshold in the game's own number format, to check the digits against.
+	function thresholdReadable(value) {
+		return Number.isFinite(value) ? `= ${Beautify(value)}` : 'not a number, the old value is kept';
+	}
+
+	// Every aura can be picked, locked ones too: the dragon resets on each ascension, and a pick is set
+	// as soon as the dragon reaches its level again.
+	function auraSelect(key) {
+		const s = settings();
+		const other = key === 'dragonAura1' ? s.dragonAura2 : s.dragonAura1;
+		let options = `<option value=""${s[key] ? '' : ' selected'}>None (leave it alone)</option>`;
+		for (const index in Game.dragonAuras) {
+			const aura = Game.dragonAuras[index];
+			if (aura.id === 0) continue;
+			const locked = Game.dragonLevel < auraUnlockLevel(aura.id);
+			options += `<option value="${escapeHtml(aura.name)}"` +
+				(aura.name === s[key] ? ' selected' : '') +
+				(aura.name === other ? ' disabled' : '') +
+				(locked ? ' style="color:#777;"' : '') + '>' +
+				escapeHtml(aura.name) + (locked ? ` (unlocks at level ${auraUnlockLevel(aura.id)})` : '') + '</option>';
+		}
+		return `<select data-afk-select="${key}" style="${FIELD_STYLE}">${options}</select>`;
 	}
 
 	function lumpButton(action, index, label, title) {
@@ -1185,6 +1569,117 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		return [lumpLine, spendLine];
 	}
 
+	// A cookie amount as time at unbuffed CpS: "14 min", "3.5 hours" or "12 days".
+	function cpsTime(cookies) {
+		const cps = Game.unbuffedCps;
+		if (!(cps > 0)) return 'unknown time, no CpS yet';
+		const minutes = cookies / cps / 60;
+		if (minutes < 1) return 'under 1 min';
+		if (minutes < 120) return `${Math.round(minutes)} min`;
+		if (minutes < 2880) return `${(minutes / 60).toFixed(1)} hours`;
+		return `${Beautify(Math.round(minutes / 1440))} days`;
+	}
+
+	function capitalize(text) {
+		return text.charAt(0).toUpperCase() + text.slice(1);
+	}
+
+	function sacrificeLabel(step) {
+		if (step.everyBuilding) return `sacrifice ${step.everyBuilding} of every building`;
+		return `sacrifice ${step.buildings[0].amount} ${capitalize(step.buildings[0].building.plural)}`;
+	}
+
+	// The next training step, what it costs and what it's waiting for.
+	function dragonTrainingText() {
+		if (!hasDragonEgg()) {
+			const egg = Game.Upgrades['A crumbly egg'];
+			if (isInStore(egg)) return `Next: buy A crumbly egg (${Beautify(egg.getPrice())} cookies)`;
+			if (!Game.Has('How to bake your dragon')) return 'No egg: it needs the heavenly upgrade "How to bake your dragon"';
+			return 'No egg yet: it appears once 1 million cookies are baked this run';
+		}
+		const step = dragonStep();
+		if (!step) return 'Fully trained';
+		if (step.cookies > 0) {
+			const reserve = reserveAmount();
+			const shortfall = step.cookies + reserve - Game.cookies;
+			const waiting = shortfall > 0 ? `waiting for ${Beautify(shortfall)} more cookies${reserve > 0 ? ', reserve included' : ''}` : 'ready';
+			return `Next: level ${Game.dragonLevel + 1} for ${Beautify(step.cookies)} cookies (${waiting})`;
+		}
+
+		const plan = sacrificePlan(step);
+		const cheap = isCheapSacrifice(plan);
+		const limit = `waiting for under ${settings().dragonTrainMinutes} min`;
+		let detail;
+		if (!plan.missing.length) {
+			detail = `rebuy cost ${cpsTime(plan.total)} of CpS, ${cheap ? 'ready' : limit}`;
+		} else {
+			const first = plan.missing[0];
+			const shortText = plan.missing.length === 1 ?
+				`${first.amount} ${capitalize(first.building.plural)} short` :
+				`short on ${plan.missing.length} kinds of building`;
+			const cost = `buying them and rebuying costs ${cpsTime(plan.total)} of CpS`;
+			if (!cheap) {
+				detail = `${shortText}; ${cost}, ${limit}`;
+			} else {
+				const shortfall = first.cost + first.amount - 1 + reserveAmount() - Game.cookies;
+				detail = `${shortText}; ${cost}, buying them first` + (shortfall > 0 ? `, need ${Beautify(shortfall)} more cookies` : '');
+			}
+		}
+		return `Next: ${sacrificeLabel(step)} (${detail})`;
+	}
+
+	// The picks that aren't in place yet, and what each one is waiting for.
+	function pendingAuraText() {
+		const s = settings();
+		const active = [Game.dragonAura, hasSecondAuraSlot() ? Game.dragonAura2 : 0];
+		const notes = [];
+		[s.dragonAura1, s.dragonAura2].forEach(function (name, slot) {
+			const id = auraId(name);
+			if (!id || active.indexOf(id) !== -1) return;
+			if (Game.dragonLevel < auraUnlockLevel(id)) notes.push(`${name} waits for level ${auraUnlockLevel(id)}`);
+			else if (slot === 1 && !hasSecondAuraSlot()) notes.push(`${name} (secondary) waits for a fully trained dragon`);
+		});
+		return notes.length ? ` Aura picks: ${notes.join(', ')}.` : '';
+	}
+
+	function petLine() {
+		if (!Game.Has('Pet the dragon')) return 'Dragon petting: needs the heavenly upgrade "Pet the dragon"';
+		if (!canPetForDrops()) return 'Dragon petting: drops start at dragon level 8';
+		const found = DRAGON_DROPS.filter(isDropFound).length;
+		if (found === DRAGON_DROPS.length) {
+			const toBuy = DRAGON_DROPS_WITHOUT_PP.filter(function (name) { return isInStore(Game.Upgrades[name]); });
+			return 'Dragon petting: all four drops found' + (toBuy.length ? `, buying ${toBuy.join(' and ')} when affordable` : '');
+		}
+		const now = new Date();
+		const current = dropWindow(now);
+		const order = dragonDropOrder();
+		let waiting = 'no drop to wait for this hour';
+		for (let ahead = 0; ahead < order.length; ahead++) {
+			const drop = order[(current.index + ahead) % order.length];
+			if (isDropFound(drop)) continue;
+			if (ahead === 0 && state.petGivenUpWindow === current.key) continue;
+			const minutes = 15 * ahead - (now.getMinutes() % 15);
+			waiting = ahead === 0 ? `petting for ${drop}` : `waiting for the ${drop} window (in ${minutes} min)`;
+			break;
+		}
+		return `Dragon petting: ${found} of ${DRAGON_DROPS.length} drops found, ${waiting}`;
+	}
+
+	function dragonLines() {
+		const s = settings();
+		let line = 'Dragon: ';
+		if (hasDragonEgg()) {
+			const auras = [Game.dragonAura, hasSecondAuraSlot() ? Game.dragonAura2 : 0]
+				.filter(function (id) { return id > 0; })
+				.map(function (id) { return Game.dragonAuras[id].name; });
+			const auraText = auras.length ? `aura${auras.length > 1 ? 's' : ''} ${auras.join(' + ')}` : 'no aura';
+			line += `level ${Game.dragonLevel} of ${dragonMaxLevel()}, ${auraText}. `;
+		}
+		line += (s.autoTrainDragon ? '' : 'Auto-train off. ') + dragonTrainingText() + '.' + pendingAuraText();
+		if (state.lastDragonAction) line += ` Last: ${state.lastDragonAction}.`;
+		return s.autoPetDragon ? [line, petLine()] : [line];
+	}
+
 	function statusLines() {
 		const s = settings();
 		const progress = prestigeProgress();
@@ -1197,7 +1692,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			`Auto-buy: ${state.buyStatus}`,
 			`Cookie reserve: ${Beautify(reserveAmount())} (${reserveLabel()})`,
 			wrinklerLine(),
-		].concat(lumpLines(), [ascendLine]);
+		].concat(lumpLines(), dragonLines(), [ascendLine]);
 		if (s.autoAscend && state.ascendWarning) {
 			lines.push('WARNING: Threshold already reached. Toggle auto-ascend off and on to confirm.');
 		}
@@ -1237,9 +1732,20 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			listing(`<label>Keep at least</label> ${numberInput('keepLumps')}<label>lumps</label>`) +
 			lumpPriorityHtml() +
 
+			heading('Krumblor the dragon') +
+			listing(note('the dragon, its auras and its drops reset on every ascension, so the mod starts over each run')) +
+			listing(toggleButton('autoTrainDragon', 'Auto-train dragon') + note('buys the crumbly egg, then trains level by level; cookie steps respect the cookie reserve')) +
+			listing(`<label>Train when a step costs less than</label> ${numberInput('dragonTrainMinutes')}<label>minutes of CpS</label>`) +
+			listing(note('for sacrifice steps: the cost of buying any missing buildings plus rebuying everything sacrificed, at unbuffed CpS')) +
+			listing(`<label>Primary aura</label> ${auraSelect('dragonAura1')}`) +
+			listing(`<label>Secondary aura</label> ${auraSelect('dragonAura2')}${note('used once the dragon is fully trained')}`) +
+			listing(note('greyed auras are locked right now and are set once the dragon reaches that level; setting an aura costs one of your highest building; an aura already in either slot is never moved')) +
+			listing(toggleButton('autoPetDragon', 'Auto-pet dragon') + note('opens the dragon panel to pet until all four drops are found, then buys Dragon fang and Dragon teddy bear; needs the heavenly upgrade Pet the dragon')) +
+
 			heading('Auto-ascend') +
 			listing(toggleButton('autoAscend', 'Auto-ascend') + cycleButton('ascendMode', 'Threshold type')) +
-			listing(`<label>Threshold</label> ${numberInput('ascendThreshold')}${note('ascends only; reincarnating and heavenly upgrades are up to you')}`) +
+			listing(`<label>Threshold</label> ${numberInput('ascendThreshold', 190)}<label id="afkThresholdReadable">${thresholdReadable(settings().ascendThreshold)}</label>`) +
+			listing(note('plain digits, or scientific notation such as 1.146e15; ascends only, reincarnating and heavenly upgrades are up to you')) +
 			listing(note('if the threshold is already reached when the mod loads or you change a setting, it warns instead of ascending')) +
 
 			heading('Other') +
@@ -1248,7 +1754,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 	}
 
 	// The data attribute that identifies a text field or dropdown, so it can be refocused after a re-render.
-	const FIELD_KEYS = ['afkNumber', 'afkLumpField', 'afkLumpTarget'];
+	const FIELD_KEYS = ['afkNumber', 'afkLumpField', 'afkLumpTarget', 'afkSelect'];
 
 	function focusedFieldSelector() {
 		const el = document.activeElement;
@@ -1374,6 +1880,24 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 				refreshStatusLine(Date.now(), true);
 			}
 		}
+		if (dataset.afkNumber === 'ascendThreshold') showThresholdReadable(Math.floor(parseBigNumber(event.target.value)));
+	}
+
+	function showThresholdReadable(value) {
+		const label = document.getElementById('afkThresholdReadable');
+		if (label) label.textContent = thresholdReadable(value);
+	}
+
+	// An aura dropdown: '' leaves the slot alone, and the same aura can't be picked twice.
+	function onAuraPicked(select) {
+		const s = settings();
+		const key = select.dataset.afkSelect;
+		const other = key === 'dragonAura1' ? s.dragonAura2 : s.dragonAura1;
+		if (key !== 'dragonAura1' && key !== 'dragonAura2') return;
+		if (select.value === '' || (isAuraName(select.value) && select.value !== other)) s[key] = select.value;
+		refreshStatusLine(Date.now(), true);
+		// Redraw so the other dropdown greys out this pick, once focus has settled.
+		setTimeout(renderMenuSection, 0);
 	}
 
 	function onMenuChange(event) {
@@ -1392,6 +1916,10 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			setTimeout(renderMenuSection, 0);
 			return;
 		}
+		if (input.dataset && input.dataset.afkSelect) {
+			onAuraPicked(input);
+			return;
+		}
 		const key = input.dataset && input.dataset.afkNumber;
 		if (!key) return;
 		const s = settings();
@@ -1400,10 +1928,14 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		} else if (key === 'autoReserveMinutes') {
 			s.autoReserveMinutes = clampInt(input.value, 0, MAX_AUTO_RESERVE_MINUTES, s.autoReserveMinutes);
 		} else if (key === 'ascendThreshold') {
-			s.ascendThreshold = clampInt(input.value, 1, Number.MAX_SAFE_INTEGER, 1);
+			// Anything that isn't a number keeps the old threshold.
+			s.ascendThreshold = sanitizeThreshold(input.value, s.ascendThreshold);
+			showThresholdReadable(s.ascendThreshold);
 			recheckAscendWarning();
 		} else if (key === 'keepLumps') {
 			s.keepLumps = clampInt(input.value, 0, MAX_KEEP_LUMPS, s.keepLumps);
+		} else if (key === 'dragonTrainMinutes') {
+			s.dragonTrainMinutes = clampInt(input.value, 0, MAX_DRAGON_TRAIN_MINUTES, s.dragonTrainMinutes);
 		}
 		input.value = s[key];
 		refreshStatusLine(Date.now(), true);
