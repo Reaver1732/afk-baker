@@ -1,6 +1,6 @@
 # AFK Baker
 
-A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building (1, 10 or 100 at a time) or upgrade according to [Cookie Monster](https://steamcommunity.com/sharedfiles/filedetails/?id=2685721341), harvests and spends sugar lumps, trains Krumblor the dragon, and ascends when you reach a prestige goal.
+A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building (1, 10 or 100 at a time) or upgrade according to [Cookie Monster](https://steamcommunity.com/sharedfiles/filedetails/?id=2685721341), harvests and spends sugar lumps, trains Krumblor the dragon, trades on the Stock Market, and ascends when you reach a prestige goal.
 
 It uses only the game's built-in mod API (`Game.registerMod`). CCSE is not needed.
 
@@ -25,7 +25,7 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
 **Auto-buy**
 - Picks the item with the lowest payback period (PP) according to Cookie Monster: any upgrade, or 1, 10 or 100 of any building. A bundle of 10 or 100 is bought in one purchase through the game's own bulk buy. The store's Buy/Sell mode and bulk setting are left as you had them. If it can't afford the best item yet, it waits and saves up rather than buying something worse.
 - While it's waiting it checks about once a second. After each purchase it buys again as soon as Cookie Monster has recalculated (about 15 purchases a second when there's a lot to buy), and it never buys twice using the same out-of-date data.
-- **Mute auto-buy purchase sounds** (on by default): AFK Baker's own purchases, building level-ups, dragon training and dragon petting are silent. Your manual purchases, golden cookies and every other sound play as normal, and the volume isn't changed.
+- **Mute auto-buy purchase sounds** (on by default): AFK Baker's own purchases, building level-ups, dragon training, dragon petting, stock trades, broker hires and office upgrades are silent. Your manual purchases, golden cookies and every other sound play as normal, and the volume isn't changed.
 - If the best item can't be bought at all (the purchase fails, the game refuses it, or Cookie Monster's price for it stays out of date), it skips that item for a minute and moves on to the next best.
 - **Cookie reserve**: how many cookies to keep banked. Lucky and Lucky + Frenzy are the bank sizes needed for a full Lucky payout.
   - **Off** (default): no reserve. Updating from 1.2 or earlier switches the reserve to Off once. After that, your choice is kept.
@@ -109,9 +109,61 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
   - The game only allows petting with the dragon panel open, so the mod opens it while it pets (usually a few seconds), then puts back whatever you had open before: Santa's panel, the dragon's, or nothing. Training does the same.
   - Dragon fang and Dragon teddy bear have no payback period, so auto-pet buys those two itself, respecting the cookie reserve. Dragon scale and Dragon claw are left to auto-buy.
 
+**Stock Market** (the Bank minigame; nothing happens until it's unlocked by giving the Bank a level)
+
+**The whole market resets every ascension.** That's how the game works: your stock (with no payout), your brokers, your office level and the profit counter are all wiped each time you ascend. AFK Baker rebuilds it on every run: it buys stock again, hires brokers again and upgrades the office again.
+
+How the market works, in short:
+- Each stock has a **resting value**: $10 for the first, $10 more for each one after, plus $1 per Bank level above 1. Prices move once a minute and wander a long way from it.
+- **$1 is one second of your highest raw CpS this ascension.** Buying costs the price plus a 20% fee. Selling has no fee.
+- You can hold as many of a stock as the most of that building you've owned this run, plus 10 per level of that building, plus the office bonus.
+- The **bank ceiling** is $97 + $3 per Bank level ($100 at level 1). Above it, a rising stock loses momentum.
+
+**No cheating.** Auto-trade only uses what a player can see: each stock's price, plus public facts such as the resting value and bank ceiling formulas. The game also keeps hidden state that decides where prices go next (each stock's mode, how long the mode lasts, and its momentum). AFK Baker never reads it. As [KarmicChaos's Ultimate Stock Market Guide](https://steamcommunity.com/sharedfiles/filedetails/?id=2601428565) puts it, automation that extracts "hidden data such as modes, durations, and deltas" is cheating, and legitimate automation sticks to buy and sell rules based on prices.
+
+- **Auto-trade stocks** (off by default), with two strategies to choose from:
+
+  | Strategy | Buys when | Sells when |
+  |---|---|---|
+  | **Resting value + guide rules** (default) | at 30% of resting value or less, or always under $5 | at 100% of resting value or more, or once past the bank ceiling |
+  | Resting value | at 30% of resting value or less | at 100% of resting value or more |
+
+  - The 30% and 100% figures are settings.
+  - The **guide rules**, "always buy under $5" and "sell the moment a stock passes the bank ceiling", are from [KarmicChaos's Ultimate Stock Market Guide](https://steamcommunity.com/sharedfiles/filedetails/?id=2601428565). The guide makes an exception to the ceiling rule that depends on a stock's hidden mode, so the mod leaves it out.
+  - **Why the default:** both strategies were run against the game's own price code from a freshly reset market (as after an ascension), 1,500 times. Stock still held when the run ends is counted as lost, because ascending wipes it. Profit is per share of warehouse space per stock, with the 20% buying fee:
+
+    | Strategy | 12-hour run | Runs that lost money | 24-hour run | Runs that lost money |
+    |---|---|---|---|---|
+    | **Resting value + guide rules** | **$47** | **0%** | $114 | 0% |
+    | Resting value | $42 | 0.2% | $114 | 0% |
+
+    The guide's passive strategy (buy in the bottom 20 to 30% of a stock's own price history, sell in the top 20 to 30%) was tested too and left out. The market resets every ascension, so early in a run there isn't enough history for "cheap" to mean anything yet. Over 12-hour runs it lost money in most runs.
+  - Never buys more than the warehouse holds, and only trades stocks whose building you've owned this run.
+  - **Never sells at a loss**: it only sells for more than the stock cost, fee included. The game only remembers the last price you bought at, so the mod keeps its own record of what it paid (saved with your settings). Stock you bought by hand is picked up at the game's last purchase price. There's a **Sell at a loss** setting, off by default.
+  - **The market may use up to N% of your bank** (default 25), so it doesn't starve auto-buy. That's counted on your bank above the cookie reserve plus what is already invested. The status line shows it, e.g. `Budget $4,200 of $18,000`, so you can see when the budget is what's holding it back.
+  - A stock can't be sold in the minute it was bought, or bought in the minute it was sold. That's the game's rule.
+  - It never takes loans.
+- **Before auto-ascend**: because ascending wipes your stock, the mod sells all of it right before an auto-ascend, the same way wrinklers are popped first, and buys nothing more once the threshold is reached. This sale ignores the no-loss rule. It can hold the ascend back by up to a minute.
+  - Stock sales rarely add prestige. The game only counts a sale toward cookies baked when it lifts your bank above everything baked this run. The threshold check uses that exact rule, so the sale is counted when it matters and ignored when it doesn't.
+- **Hire brokers** (off by default, needs auto-trade on): each broker costs 20 minutes of CpS and cuts the buying fee by a twentieth (20%, 19%, 18.05%...). The next broker is hired when its saving on one full fill of your warehouses at the buy threshold covers its price, and the cookies are spare after the reserve. The most you can have is your highest grandma count this run divided by 10, plus your grandma level.
+- **Upgrade office** (off by default, needs auto-trade on): office upgrades add warehouse space.
+
+  | Upgrade | Cursors sacrificed | Cursor level needed | Gives |
+  |---|---|---|---|
+  | 1 | 100 | 2 | +25 space per stock |
+  | 2 | 200 | 4 | +50 space, +1 loan slot |
+  | 3 | 350 | 8 | +75 space |
+  | 4 | 500 | 10 | +100 space, +1 loan slot |
+  | 5 | 700 | 12 | +50% of the building-count part of the space, +1 loan slot |
+
+  - The Cursors are sacrificed with no refund, so the mod only upgrades when buying them back would cost less than **N minutes of CpS** (default 30, unbuffed CpS).
+  - The Cursor level is a requirement only. The mod **never spends sugar lumps** for it; it waits until Cursor has the level (add Cursor to the lump priority list if you want that).
+  - Brokers and the office have no game function, only buttons. The mod presses the game's own buttons, which works with the Bank panel closed, so the panel is never opened.
+
 **Auto-ascend**
 - The threshold is either **prestige gained this run** or **total prestige level after ascending**. It uses the same numbers as the game's Legacy button.
 - When you reach it, the mod ascends. It never reincarnates, so you choose your heavenly upgrades yourself.
+- With auto-trade on, all stock is sold first (see Stock Market above).
 - It is **off** by default. The default threshold is 1,000 prestige gained.
 - The threshold box takes plain digits (commas are fine) or scientific notation such as `1.146e15`, and is wide enough for 20 digits. Next to it, the mod shows the value in the game's own number format (for example `= 1.146 quadrillion`) so you can check you typed the right number of digits. Something that isn't a number keeps the old threshold.
 - **Safety guard**: auto-ascend only fires when you cross the threshold during play. If the threshold is already reached when the mod loads, when you turn auto-ascend on, or when you change the threshold, type or wrinkler mode, the mod shows a warning instead of ascending. To confirm, toggle auto-ascend off and on again.
@@ -129,6 +181,7 @@ The Options section also shows a live status line:
 - sugar lumps owned, the time until the current lump is ripe, and the last harvest
 - the next lump spend and how many lumps it still needs, the lumps needed to finish the whole priority list, and the last level-up, e.g. `Next: Wizard tower to level 3, 2 more lumps needed. 9 lumps to finish the list`
 - the dragon's level and auras, and the next training step with its cost and what it's waiting for, e.g. `Next: sacrifice 100 Farms (rebuy cost 14 min of CpS, waiting for under 10 min)`; with auto-pet on, how many drops are found and which one it's waiting for
+- the stock market: shares held and what they're worth, the game's profit figure for this run, the market budget (`Budget $4,200 of $18,000`), the strategy in use, and the last trade with the rule that triggered it, e.g. `Bought 120 CHC at $8.40 (resting $21.00; 30% of resting or less)`; with brokers or the office on, a second line shows how many brokers you have, the current fee, and what the next broker or office upgrade is waiting for
 - your progress toward the ascend threshold, plus the guard warning when it's active
 
 ## Requirements
@@ -155,6 +208,8 @@ If you use other automation mods (for example FortuneHelper or Grandma's Rolling
 Inspired by [FortuneHelper](https://steamcommunity.com/sharedfiles/filedetails/?id=2693901672) and [Grandma's Rolling Pin](https://steamcommunity.com/sharedfiles/filedetails/?id=3199859496). No code from either mod is used. AFK Baker is written from scratch against the game's own source.
 
 The payback-period data comes from [Cookie Monster](https://github.com/CookieMonsterTeam/CookieMonster).
+
+The Stock Market's "always buy under $5" and "sell once past the bank ceiling" rules come from [KarmicChaos's Ultimate Stock Market Guide](https://steamcommunity.com/sharedfiles/filedetails/?id=2601428565), which also explains how the market works.
 
 ## License
 

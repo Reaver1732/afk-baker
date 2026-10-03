@@ -7,7 +7,7 @@
 	'use strict';
 
 	const MOD_ID = 'afk baker';
-	const VERSION = '1.7.0';
+	const VERSION = '1.8.0';
 	// Settings saved before a default changed are reset to the new default:
 	// v1 had auto-ascend on, v2 had Elder Pledge on, v3 had the Auto reserve.
 	const SETTINGS_VERSION = 4;
@@ -36,10 +36,18 @@
 	const WRINKLER_MODES = { feed: 'Feed, pop before ascending', instant: 'Pop instantly', off: 'Off' };
 	const FORTUNE_MODES = { all: 'All fortunes', upgrades: 'Upgrade fortunes only' };
 	const ASCEND_MODES = { gained: 'Prestige gained this run', total: 'Total prestige after ascending' };
+	// Stock market strategies. The guide rules are from KarmicChaos's Ultimate Stock Market Guide: always buy
+	// under $5, sell once past the bank ceiling. Simulated against the game's own price code, adding them
+	// did best over 12-hour runs and tied over 24-hour runs.
+	const MARKET_STRATEGIES = {
+		restingGuide: 'Resting value + guide rules',
+		resting: 'Resting value',
+	};
 	const CYCLE_OPTIONS = {
 		reserveMode: RESERVE_MODES,
 		wrinklerMode: WRINKLER_MODES,
 		fortuneMode: FORTUNE_MODES,
+		marketStrategy: MARKET_STRATEGIES,
 		ascendMode: ASCEND_MODES,
 	};
 
@@ -83,6 +91,20 @@
 	const DRAGON_DROPS_WITHOUT_PP = ['Dragon fang', 'Dragon teddy bear'];
 	// Prestige can pass 2^53, so the threshold is a plain number, not a safe integer.
 	const MAX_ASCEND_THRESHOLD = 1e300;
+	const MARKET_CHECK_INTERVAL_MS = 1000;
+	// M.buyGood plays cashOut, M.sellGood cashIn, and the broker and office buttons cashIn2.
+	const MARKET_SOUND = /^snd\/cash(In|In2|Out)\.mp3$/;
+	// Whole-number settings and their limits: [min, max].
+	const INT_SETTINGS = {
+		clickRate: [0, MAX_CLICK_RATE],
+		autoReserveMinutes: [0, MAX_AUTO_RESERVE_MINUTES],
+		keepLumps: [0, MAX_KEEP_LUMPS],
+		dragonTrainMinutes: [0, MAX_DRAGON_TRAIN_MINUTES],
+		marketBuyPercent: [1, 100],
+		marketSellPercent: [1, 1000],
+		marketBankPercent: [0, 100],
+		officeMinutes: [0, MAX_DRAGON_TRAIN_MINUTES],
+	};
 	const REINCARNATE_GRACE_MS = 3000;
 	const STATUS_REFRESH_MS = 500;
 
@@ -110,6 +132,15 @@
 		dragonAura1: '',
 		dragonAura2: '',
 		autoPetDragon: false,
+		autoTrade: false,
+		marketStrategy: 'restingGuide',
+		marketBuyPercent: 30,
+		marketSellPercent: 100,
+		marketBankPercent: 25,
+		marketSellAtLoss: false,
+		autoBrokers: false,
+		autoOffice: false,
+		officeMinutes: 30,
 		autoAscend: false,
 		ascendMode: 'gained',
 		ascendThreshold: 1000,
@@ -161,9 +192,25 @@
 		return hasKey(Game.dragonAurasBN, name) && Game.dragonAurasBN[name].id > 0;
 	}
 
+	// What the mod paid for the stock it holds, per building name: { shares, cost in $ with fees }.
+	// Entries that don't make sense are dropped; the mod rebuilds them from the game's own records.
+	function sanitizeMarketBasis(raw) {
+		const basis = {};
+		if (!raw || typeof raw !== 'object') return basis;
+		for (const name in raw) {
+			const entry = raw[name];
+			if (!hasKey(Game.Objects, name) || !entry || typeof entry !== 'object') continue;
+			if (!Number.isInteger(entry.shares) || entry.shares <= 0) continue;
+			if (typeof entry.cost !== 'number' || !Number.isFinite(entry.cost) || entry.cost < 0) continue;
+			basis[name] = { shares: entry.shares, cost: entry.cost };
+		}
+		return basis;
+	}
+
 	function sanitizeSettings(raw) {
 		const settings = Object.assign({}, DEFAULTS);
 		settings.lumpPriority = sanitizeLumpPriority(raw && raw.lumpPriority);
+		settings.marketBasis = sanitizeMarketBasis(raw && raw.marketBasis);
 		if (!raw || typeof raw !== 'object') return settings;
 
 		for (const key in DEFAULTS) {
@@ -172,11 +219,10 @@
 		for (const key in CYCLE_OPTIONS) {
 			if (hasKey(CYCLE_OPTIONS[key], raw[key])) settings[key] = raw[key];
 		}
-		settings.clickRate = clampInt(raw.clickRate, 0, MAX_CLICK_RATE, DEFAULTS.clickRate);
-		settings.autoReserveMinutes = clampInt(raw.autoReserveMinutes, 0, MAX_AUTO_RESERVE_MINUTES, DEFAULTS.autoReserveMinutes);
+		for (const key in INT_SETTINGS) {
+			settings[key] = clampInt(raw[key], INT_SETTINGS[key][0], INT_SETTINGS[key][1], DEFAULTS[key]);
+		}
 		settings.ascendThreshold = sanitizeThreshold(raw.ascendThreshold, DEFAULTS.ascendThreshold);
-		settings.keepLumps = clampInt(raw.keepLumps, 0, MAX_KEEP_LUMPS, DEFAULTS.keepLumps);
-		settings.dragonTrainMinutes = clampInt(raw.dragonTrainMinutes, 0, MAX_DRAGON_TRAIN_MINUTES, DEFAULTS.dragonTrainMinutes);
 		if (isAuraName(raw.dragonAura1)) settings.dragonAura1 = raw.dragonAura1;
 		if (isAuraName(raw.dragonAura2) && raw.dragonAura2 !== settings.dragonAura1) settings.dragonAura2 = raw.dragonAura2;
 		const savedVersion = Number(raw.settingsVersion) || 1;
@@ -217,6 +263,11 @@
 		petSession: null,
 		petGivenUpWindow: '',
 		dropOrder: { seed: null, order: [] },
+		nextMarketCheckAt: 0,
+		lastTrade: '',
+		lastMarketAction: '',
+		// Set once the auto-ascend threshold is met: the market only sells from then on.
+		ascendPending: false,
 		ascendTriggered: false,
 		// Set when the threshold was already met at load or by a settings change; cleared by re-arming.
 		ascendWarning: false,
@@ -289,6 +340,7 @@
 			runAutoBuy(now);
 			runLumps(now);
 			runDragon(now);
+			runMarket(now);
 			checkAutoAscend();
 			refreshStatusLine(now);
 		} catch (e) {
@@ -304,6 +356,7 @@
 		state.buyResumeAt = Date.now() + REINCARNATE_GRACE_MS;
 		state.skipUntil = {};
 		forgetDragonRun();
+		forgetMarketRun();
 	}
 
 	function onReset() {
@@ -312,6 +365,15 @@
 		state.buyResumeAt = Date.now() + REINCARNATE_GRACE_MS;
 		state.skipUntil = {};
 		forgetDragonRun();
+		forgetMarketRun();
+	}
+
+	// The game has already wiped the market (M.reset): holdings, brokers, office and profit.
+	function forgetMarketRun() {
+		settings().marketBasis = {};
+		state.lastTrade = '';
+		state.lastMarketAction = '';
+		state.ascendPending = false;
 	}
 
 	// The game has already reset the dragon and closed the special panel, so there's nothing to put back.
@@ -1265,16 +1327,277 @@
 	}
 
 	/* =====================================================================
+	   STOCK MARKET (the Bank minigame, minigameMarket.js)
+	   Holdings, brokers, the office and the profit counter are all wiped on every ascension (M.reset),
+	   so everything here starts over each run. Prices are in $: $1 is one second of the highest raw CpS
+	   this ascension. Buying costs the price plus an overhead; selling has no fee.
+	   ===================================================================== */
+
+	// The minigame once the Bank has a level and its script has loaded. The game doesn't run minigames
+	// in a Born again run.
+	function market() {
+		const bank = Game.Objects['Bank'];
+		return bank && Game.isMinigameReady(bank) && !isBornAgain() ? bank.minigame : null;
+	}
+
+	// The fee on purchases, as in M.buyGood: 20%, cut by 5% for each broker.
+	function marketOverhead(brokers) {
+		return 0.01 * (20 * Math.pow(0.95, brokers));
+	}
+
+	// What the shares held of a stock cost, fees included. The game only remembers the last purchase
+	// price (good.prev), so the mod keeps its own record and squares it with the real stock on every
+	// look: shares it has no record of count as bought at that last price with today's fee.
+	function costBasis(M, good) {
+		const all = settings().marketBasis;
+		const key = good.building.name;
+		if (good.stock <= 0) {
+			delete all[key];
+			return { shares: 0, cost: 0 };
+		}
+		const basis = all[key] || (all[key] = { shares: 0, cost: 0 });
+		if (good.stock < basis.shares) {
+			basis.cost *= good.stock / basis.shares;
+		} else if (good.stock > basis.shares) {
+			const price = good.prev > 0 ? good.prev : good.val;
+			basis.cost += (good.stock - basis.shares) * price * (1 + marketOverhead(M.brokers));
+		}
+		basis.shares = good.stock;
+		return basis;
+	}
+
+	// In $. The market may hold up to its share of the bank above the cookie reserve plus what it has
+	// already invested; `free` is what it may still spend right now.
+	function marketBudget(M) {
+		const rate = Game.cookiesPsRawHighest;
+		let invested = 0;
+		for (const good of M.goodsById) invested += costBasis(M, good).cost;
+		if (!(rate > 0)) return { invested: invested, allowed: 0, free: 0 };
+		const bank = Math.max(0, Game.cookies - reserveAmount()) / rate;
+		const allowed = settings().marketBankPercent / 100 * (bank + invested);
+		return { invested: invested, allowed: allowed, free: Math.max(0, Math.min(allowed - invested, bank)) };
+	}
+
+	function dollars(amount) {
+		const size = Math.abs(amount);
+		return (amount < 0 ? '-$' : '$') + (size < 1000 ? size.toFixed(2) : Beautify(Math.round(size)));
+	}
+
+	// `reason` names the rule behind the trade, for the status line.
+	function sellStock(M, good, reason) {
+		const shares = good.stock;
+		const price = M.getGoodPrice(good);
+		const basis = costBasis(M, good);
+		const paid = basis.cost / basis.shares;
+		if (!withSoundsMuted(MARKET_SOUND, function () { return M.sellGood(good.id, shares); })) return false;
+		costBasis(M, good);
+		state.lastTrade = `Sold ${shares} ${good.symbol} at ${dollars(price)} (resting ${dollars(M.getRestingVal(good.id))}, paid ${dollars(paid)} with fees${reason ? '; ' + reason : ''})`;
+		debugLog(state.lastTrade);
+		return true;
+	}
+
+	function buyStock(M, good, shares, reason) {
+		const before = good.stock;
+		const price = M.getGoodPrice(good);
+		costBasis(M, good);
+		// 10000 is M.buyGood's code for "as many as the bank allows".
+		const amount = shares === 10000 ? 9999 : shares;
+		if (!withSoundsMuted(MARKET_SOUND, function () { return M.buyGood(good.id, amount); })) return false;
+		// M.buyGood has set good.prev to this price, so this records the new shares at what they cost.
+		costBasis(M, good);
+		state.lastTrade = `Bought ${good.stock - before} ${good.symbol} at ${dollars(price)} (resting ${dollars(M.getRestingVal(good.id))}${reason ? '; ' + reason : ''})`;
+		debugLog(state.lastTrade);
+		return true;
+	}
+
+	/* Trading only uses what a player can see: each stock's price, the resting value (a public formula,
+	   shown in the guide), the bank ceiling, warehouse space and the trade lock the game explains in its
+	   tooltip. It never reads the hidden market state the game uses
+	   to move prices (good.mode, good.dur, good.d); that would be cheating. */
+
+	// Mirrors M.tick: above 100 + 3 per Bank level past 1 (the guide's $97 + $3 per level), a rising
+	// stock loses momentum.
+	function bankCeiling() {
+		return 100 + (Game.Objects['Bank'].level - 1) * 3;
+	}
+
+	function usesGuideRules() {
+		return settings().marketStrategy === 'restingGuide';
+	}
+
+	// Whether the strategy would buy or sell this stock at today's price, and why: { action, reason }.
+	function tradeSignal(M, good) {
+		const s = settings();
+		const price = M.getGoodPrice(good);
+		if (usesGuideRules() && price < 5) return { action: 'buy', reason: 'under $5' };
+		if (usesGuideRules() && price > bankCeiling()) return { action: 'sell', reason: `past the $${bankCeiling()} bank ceiling` };
+		const rest = M.getRestingVal(good.id);
+		if (price <= s.marketBuyPercent / 100 * rest) return { action: 'buy', reason: `${s.marketBuyPercent}% of resting or less` };
+		if (price >= s.marketSellPercent / 100 * rest) return { action: 'sell', reason: `${s.marketSellPercent}% of resting or more` };
+		return { action: '', reason: '' };
+	}
+
+	// The price the strategy buys this stock at, for sizing a warehouse fill.
+	function buyPrice(M, good) {
+		return settings().marketBuyPercent / 100 * M.getRestingVal(good.id);
+	}
+
+	// A stock can't be sold in the tick it was bought (good.last 1), or bought in the tick it was sold (2).
+	function tradeStocks(M) {
+		const s = settings();
+		for (const good of M.goodsById) {
+			if (!good.active || good.stock <= 0 || good.last === 1) continue;
+			const signal = tradeSignal(M, good);
+			if (signal.action !== 'sell') continue;
+			const basis = costBasis(M, good);
+			if (!s.marketSellAtLoss && M.getGoodPrice(good) <= basis.cost / basis.shares) continue;
+			sellStock(M, good, signal.reason);
+		}
+
+		if (state.ascendPending) return;
+		const priceRatio = function (good) { return M.getGoodPrice(good) / M.getRestingVal(good.id); };
+		const cheap = M.goodsById.filter(function (good) {
+			return good.active && good.last !== 2 && good.stock < M.getGoodMaxStock(good) && tradeSignal(M, good).action === 'buy';
+		}).sort(function (a, b) { return priceRatio(a) - priceRatio(b); });
+		for (const good of cheap) {
+			const perShare = M.getGoodPrice(good) * (1 + marketOverhead(M.brokers));
+			const shares = Math.min(M.getGoodMaxStock(good) - good.stock, Math.floor(marketBudget(M).free / perShare));
+			if (shares >= 1) buyStock(M, good, shares, tradeSignal(M, good).reason);
+		}
+	}
+
+	// Sells every stock that can be sold, at whatever it fetches; used right before auto-ascending,
+	// when the stock would be wiped anyway. Returns true while stock bought this tick is still held.
+	function sellAllStock(M) {
+		let remaining = false;
+		for (const good of M.goodsById) {
+			if (good.stock <= 0) continue;
+			if (good.last === 1 || !sellStock(M, good, 'selling everything before ascending')) remaining = true;
+		}
+		return remaining;
+	}
+
+	function holdingsValue(M) {
+		let shares = 0;
+		let stocks = 0;
+		let value = 0;
+		for (const good of M.goodsById) {
+			if (good.stock <= 0) continue;
+			shares += good.stock;
+			stocks++;
+			value += good.stock * M.getGoodPrice(good);
+		}
+		return { shares: shares, stocks: stocks, value: value };
+	}
+
+	// The game has no function for hiring a broker or upgrading the office: both are click handlers on
+	// the Bank minigame's own buttons (bankBrokersBuy and bankOfficeUpgrade in minigameMarket.js). The
+	// buttons exist while the panel is closed, so this runs the game's handler as it is. The click
+	// doesn't bubble, so nothing else in the game sees it, and the sparkle the handler would draw on
+	// the (possibly hidden) button is left out.
+	function clickMarketButton(id) {
+		const button = document.getElementById(id);
+		if (!button) return;
+		const savedSparkle = Game.SparkleOn;
+		Game.SparkleOn = function () {};
+		try {
+			withSoundsMuted(MARKET_SOUND, function () {
+				button.dispatchEvent(new MouseEvent('click', { bubbles: false }));
+			});
+		} finally {
+			Game.SparkleOn = savedSparkle;
+		}
+	}
+
+	// One full fill of the warehouses at the buy threshold, in $: what a round of buying is worth.
+	function warehouseFillValue(M) {
+		let total = 0;
+		for (const good of M.goodsById) {
+			if (good.active) total += M.getGoodMaxStock(good) * buyPrice(M, good);
+		}
+		return total;
+	}
+
+	// The next broker lowers the fee on everything bought afterwards. It's hired when that saving on
+	// one warehouse fill covers its price.
+	function brokerPlan(M) {
+		const rate = Game.cookiesPsRawHighest;
+		const saving = marketOverhead(M.brokers) - marketOverhead(M.brokers + 1);
+		const price = rate > 0 ? M.getBrokerPrice() / rate : Infinity;
+		return { fill: warehouseFillValue(M), needed: price / saving, full: M.brokers >= M.getMaxBrokers() };
+	}
+
+	function hireBroker(M) {
+		const plan = brokerPlan(M);
+		if (plan.full || plan.fill < plan.needed || !canAfford(M.getBrokerPrice())) return false;
+		const before = M.brokers;
+		clickMarketButton('bankBrokersBuy');
+		if (M.brokers <= before) return false;
+		state.lastMarketAction = `Hired broker ${M.brokers}`;
+		debugLog(state.lastMarketAction);
+		return true;
+	}
+
+	// The next office upgrade: the Cursors it sacrifices (no refund), the Cursor level it requires
+	// (a requirement only, no lumps are spent) and what buying those Cursors back would cost.
+	function officePlan(M) {
+		const office = M.offices[M.officeLevel];
+		if (!office || !office.cost) return null;
+		const cursors = Game.Objects['Cursor'];
+		return {
+			cursors: office.cost[0],
+			level: office.cost[1],
+			hasCursors: cursors.amount >= office.cost[0],
+			hasLevel: cursors.level >= office.cost[1],
+			rebuyCost: buildingRangePrice(cursors, cursors.amount - office.cost[0], cursors.amount),
+		};
+	}
+
+	function isCheapOffice(plan) {
+		return plan.rebuyCost < settings().officeMinutes * 60 * Game.unbuffedCps;
+	}
+
+	function upgradeOffice(M) {
+		const plan = officePlan(M);
+		if (!plan || !plan.hasCursors || !plan.hasLevel || !isCheapOffice(plan)) return false;
+		const before = M.officeLevel;
+		clickMarketButton('bankOfficeUpgrade');
+		if (M.officeLevel <= before) return false;
+		state.lastMarketAction = `Upgraded the office to level ${M.officeLevel + 1} (sacrificed ${plan.cursors} Cursors)`;
+		debugLog(state.lastMarketAction);
+		return true;
+	}
+
+	function runMarket(now) {
+		if (now < state.nextMarketCheckAt) return;
+		state.nextMarketCheckAt = now + MARKET_CHECK_INTERVAL_MS;
+		const M = market();
+		const s = settings();
+		if (!M || !s.autoTrade || now < state.buyResumeAt) return;
+		tradeStocks(M);
+		if (state.ascendPending) return;
+		if (s.autoBrokers) hireBroker(M);
+		// The sacrificed Cursors change CpS, so the PP buyer waits for fresh data.
+		if (s.autoOffice && upgradeOffice(M)) noteGameChanged();
+	}
+
+	/* =====================================================================
 	   AUTO-ASCEND
 	   ===================================================================== */
 
 	function prestigeProgress() {
 		// In "feed" mode every wrinkler, shinies included, is popped before ascending, so count their payout now.
 		const summary = wrinklerSummary();
-		const pending = settings().wrinklerMode === 'feed' ? summary.normalPayout + summary.shinyPayout : 0;
+		const wrinklers = settings().wrinklerMode === 'feed' ? summary.normalPayout + summary.shinyPayout : 0;
+		// With auto-trade on, all stock is sold before ascending too. A sale only raises the cookies baked
+		// when the bank ends up above them (M.sellGood: cookiesEarned = max(cookies, cookiesEarned)),
+		// while a popped wrinkler adds to both.
+		const M = settings().autoTrade ? market() : null;
+		const stock = M ? holdingsValue(M).value * Game.cookiesPsRawHighest : 0;
+		const baked = Math.max(Game.cookiesEarned + wrinklers, Game.cookies + wrinklers + stock);
 		// Same expressions the game uses for the Legacy button tooltip.
 		const owned = Math.floor(Game.HowMuchPrestige(Game.cookiesReset));
-		const afterAscending = Math.floor(Game.HowMuchPrestige(Game.cookiesReset + Game.cookiesEarned + pending));
+		const afterAscending = Math.floor(Game.HowMuchPrestige(Game.cookiesReset + baked));
 		return { gained: afterAscending - owned, total: afterAscending };
 	}
 
@@ -1306,14 +1629,21 @@
 			state.needsLoadCheck = false;
 			recheckAscendWarning();
 		}
+		if (!s.autoAscend || state.ascendWarning) state.ascendPending = false;
 		if (!s.autoAscend || state.ascendTriggered || state.ascendWarning) return;
 		const progress = prestigeProgress();
-		if (!isThresholdMet(progress)) return;
+		state.ascendPending = isThresholdMet(progress);
+		if (!state.ascendPending) return;
 
 		// Wrinklers only pop during normal logic ticks, not during the ascend animation, and
 		// reincarnating wipes them, shinies included. Pop them all first and ascend on a later
 		// tick once they've paid out.
-		if (s.wrinklerMode === 'feed' && popWrinklers(true)) return;
+		const waitingForWrinklers = s.wrinklerMode === 'feed' && popWrinklers(true);
+		// Ascending wipes the market, so sell all stock first. Stock bought this market tick can't be
+		// sold until the next one, up to a minute away; the market buys nothing more in the meantime.
+		const M = s.autoTrade ? market() : null;
+		const waitingForStock = !!M && sellAllStock(M);
+		if (waitingForWrinklers || waitingForStock) return;
 
 		state.ascendTriggered = true;
 		console.log(`${LOG_PREFIX} Auto-ascending: +${progress.gained} prestige (total ${progress.total}).`);
@@ -1680,19 +2010,65 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		return s.autoPetDragon ? [line, petLine()] : [line];
 	}
 
+	function marketStaffLine(M) {
+		const s = settings();
+		const parts = [];
+		if (s.autoBrokers) {
+			const plan = brokerPlan(M);
+			let text = `Brokers: ${M.brokers} of ${M.getMaxBrokers()} (buying fee ${(marketOverhead(M.brokers) * 100).toFixed(1)}%)`;
+			if (plan.full) text += ', at the maximum';
+			else if (plan.fill < plan.needed) text += `, the next pays off once a warehouse fill is worth ${dollars(plan.needed)} (now ${dollars(plan.fill)})`;
+			else if (!canAfford(M.getBrokerPrice())) text += `, hiring the next when ${Beautify(M.getBrokerPrice())} cookies are spare`;
+			else text += ', hiring the next';
+			parts.push(text);
+		}
+		if (s.autoOffice) {
+			const plan = officePlan(M);
+			let text = `Office: level ${M.officeLevel + 1} of ${M.offices.length}`;
+			if (!plan) {
+				text += ', fully upgraded';
+			} else {
+				text += `, next upgrade sacrifices ${plan.cursors} Cursors`;
+				if (!plan.hasLevel) text += ` (waiting for Cursor level ${plan.level})`;
+				else if (!plan.hasCursors) text += ` (waiting until you own ${plan.cursors})`;
+				else text += ` (rebuy cost ${cpsTime(plan.rebuyCost)} of CpS, ${isCheapOffice(plan) ? 'ready' : `waiting for under ${s.officeMinutes} min`})`;
+			}
+			parts.push(text);
+		}
+		if (state.lastMarketAction) parts.push(`Last: ${state.lastMarketAction}`);
+		return 'Market staff: ' + parts.join('. ') + '.';
+	}
+
+	function marketLines() {
+		const s = settings();
+		const M = market();
+		if (!M) return s.autoTrade ? ['Stock market: not unlocked yet (the Bank needs a level, bought with a sugar lump)'] : [];
+		const held = holdingsValue(M);
+		const budget = marketBudget(M);
+		const holding = held.shares ?
+			`Holding ${Beautify(held.shares)} shares in ${held.stocks} stock${held.stocks === 1 ? '' : 's'} worth ${dollars(held.value)}` :
+			'Holding nothing';
+		let line = 'Stock market: ' + (s.autoTrade ? `${MARKET_STRATEGIES[s.marketStrategy]}. ` : 'Auto-trade off. ') +
+			`${holding}, profit this run ${dollars(M.profit)}. Budget ${dollars(budget.invested)} of ${dollars(budget.allowed)}.`;
+		if (s.autoTrade && state.ascendPending) line += ' Selling everything before ascending.';
+		if (state.lastTrade) line += ` Last: ${state.lastTrade}.`;
+		return s.autoTrade && (s.autoBrokers || s.autoOffice) ? [line, marketStaffLine(M)] : [line];
+	}
+
 	function statusLines() {
 		const s = settings();
 		const progress = prestigeProgress();
 		let ascendLine = `Prestige: ${Beautify(ascendProgressValue(progress))} / ${Beautify(s.ascendThreshold)} ` +
 			(s.ascendMode === 'total' ? 'total' : 'gained this run');
 		if (s.wrinklerMode === 'feed') ascendLine += ' (includes wrinkler payout)';
+		if (s.autoTrade && market()) ascendLine += ' (stock sale counted where it adds to cookies baked)';
 		if (!s.autoAscend) ascendLine += ', auto-ascend off';
 
 		const lines = [
 			`Auto-buy: ${state.buyStatus}`,
 			`Cookie reserve: ${Beautify(reserveAmount())} (${reserveLabel()})`,
 			wrinklerLine(),
-		].concat(lumpLines(), dragonLines(), [ascendLine]);
+		].concat(lumpLines(), dragonLines(), marketLines(), [ascendLine]);
 		if (s.autoAscend && state.ascendWarning) {
 			lines.push('WARNING: Threshold already reached. Toggle auto-ascend off and on to confirm.');
 		}
@@ -1741,6 +2117,17 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			listing(`<label>Secondary aura</label> ${auraSelect('dragonAura2')}${note('used once the dragon is fully trained')}`) +
 			listing(note('greyed auras are locked right now and are set once the dragon reaches that level; setting an aura costs one of your highest building; an aura already in either slot is never moved')) +
 			listing(toggleButton('autoPetDragon', 'Auto-pet dragon') + note('opens the dragon panel to pet until all four drops are found, then buys Dragon fang and Dragon teddy bear; needs the heavenly upgrade Pet the dragon')) +
+
+			heading('Stock market') +
+			listing(note('the whole market resets on every ascension (your stock, brokers and office), so the mod rebuilds it each run; nothing happens until the Bank minigame is unlocked')) +
+			listing(toggleButton('autoTrade', 'Auto-trade stocks') + note('uses only what a player can see, the prices; never reads the market\'s hidden state; never takes loans')) +
+			listing(cycleButton('marketStrategy', 'Strategy') + note('guide rules, from KarmicChaos\'s stock market guide: always buy under $5, sell once past the bank ceiling ($97 + $3 per Bank level)')) +
+			listing(`<label>Buy at</label> ${numberInput('marketBuyPercent', 40)}<label>% of resting value or less; sell at</label> ${numberInput('marketSellPercent', 40)}<label>% or more</label>`) +
+			listing(`<label>The market may use up to</label> ${numberInput('marketBankPercent', 40)}<label>% of your bank</label>` + note('counted on the bank above the cookie reserve plus what is already invested')) +
+			listing(toggleButton('marketSellAtLoss', 'Sell at a loss') + note('off: only sells for more than the stock cost, buying fee included; all stock is still sold right before an auto-ascend')) +
+			listing(toggleButton('autoBrokers', 'Hire brokers') + note('each cuts the 20% buying fee by a twentieth; hired when the saving on one full warehouse fill covers its price')) +
+			listing(toggleButton('autoOffice', 'Upgrade office') + `<label>when rebuying the Cursors costs less than</label> ${numberInput('officeMinutes', 50)}<label>minutes of CpS</label>`) +
+			listing(note('an office upgrade sacrifices Cursors and needs a Cursor level; the mod never spends sugar lumps for it; brokers and office only run while auto-trade is on')) +
 
 			heading('Auto-ascend') +
 			listing(toggleButton('autoAscend', 'Auto-ascend') + cycleButton('ascendMode', 'Threshold type')) +
@@ -1923,19 +2310,13 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		const key = input.dataset && input.dataset.afkNumber;
 		if (!key) return;
 		const s = settings();
-		if (key === 'clickRate') {
-			s.clickRate = clampInt(input.value, 0, MAX_CLICK_RATE, s.clickRate);
-		} else if (key === 'autoReserveMinutes') {
-			s.autoReserveMinutes = clampInt(input.value, 0, MAX_AUTO_RESERVE_MINUTES, s.autoReserveMinutes);
-		} else if (key === 'ascendThreshold') {
+		if (key === 'ascendThreshold') {
 			// Anything that isn't a number keeps the old threshold.
 			s.ascendThreshold = sanitizeThreshold(input.value, s.ascendThreshold);
 			showThresholdReadable(s.ascendThreshold);
 			recheckAscendWarning();
-		} else if (key === 'keepLumps') {
-			s.keepLumps = clampInt(input.value, 0, MAX_KEEP_LUMPS, s.keepLumps);
-		} else if (key === 'dragonTrainMinutes') {
-			s.dragonTrainMinutes = clampInt(input.value, 0, MAX_DRAGON_TRAIN_MINUTES, s.dragonTrainMinutes);
+		} else if (hasKey(INT_SETTINGS, key)) {
+			s[key] = clampInt(input.value, INT_SETTINGS[key][0], INT_SETTINGS[key][1], s[key]);
 		}
 		input.value = s[key];
 		refreshStatusLine(Date.now(), true);
