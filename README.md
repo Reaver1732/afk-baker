@@ -201,6 +201,8 @@ The Options section also shows a live status line:
 
 Everything AFK Baker decides, it decides from information a player can see on screen: prices, meters, costs, tooltips, buffs and what is in the store, plus fixed formulas anyone can look up, such as a stock's resting value. It never reads the game's hidden state to predict an outcome. In particular, no code in the mod reads the save's seed, the lifetime spell count, a golden cookie's effect before it is clicked, or the Stock Market's hidden modes and momentum. The game's own functions use those when the mod asks the game to cast a spell or pet the dragon, exactly as they do when you click.
 
+Other mods can replace a few of AFK Baker's decisions through its extension hooks (`Game.mods['afk baker'].ext`, documented in `main.js`); AFK Baker itself always works as described here.
+
 ## Requirements
 
 - Cookie Clicker on Steam (tested against version 2.053).

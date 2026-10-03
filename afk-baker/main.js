@@ -7,7 +7,7 @@
 	'use strict';
 
 	const MOD_ID = 'afk baker';
-	const VERSION = '1.9.0';
+	const VERSION = '1.10.0';
 	// Settings saved before a default changed are reset to the new default:
 	// v1 had auto-ascend on, v2 had Elder Pledge on, v3 had the Auto reserve.
 	const SETTINGS_VERSION = 4;
@@ -312,8 +312,44 @@
 		lastError: '',
 	};
 
+	/* =====================================================================
+	   EXTENSION HOOKS
+	   Another mod can replace three of AFK Baker's decisions by setting a function on
+	   Game.mods['afk baker'].ext.overrides. AFK Baker still does the casting, trading and petting
+	   itself, with all its usual checks; an override only changes the decision. A function may be
+	   called often (the status line calls it too), so it must not change anything. It returns
+	   undefined to keep AFK Baker's own decision.
+
+	     grimoireSpell({ M, spell })       The key in M.spells of the spell to cast once the magic meter
+	                                       is full, or '' to cast nothing for now. `spell` is the
+	                                       player's setting.
+	     stockSignal({ M, good, signal })  { action: 'buy' | 'sell' | '', reason: 'text' } for one stock.
+	                                       `signal` is AFK Baker's own decision, in the same shape.
+	     petWindow({ key })                false to skip petting the dragon in the current quarter-hour.
+	                                       `key` is 'hour:quarter'.
+
+	   M is the minigame object. Check ext.apiVersion first; it goes up when the hooks change.
+	   ===================================================================== */
+	const ext = {
+		apiVersion: 1,
+		overrides: { grimoireSpell: null, stockSignal: null, petWindow: null },
+	};
+
+	// An add-on's answer for a decision: undefined if there is no add-on for it, or if it threw.
+	function askAddOn(name, context) {
+		const override = ext.overrides[name];
+		if (typeof override !== 'function') return undefined;
+		try {
+			return override(context);
+		} catch (e) {
+			state.lastError = `Add-on hook ${name}: ${String(e && e.message || e)}`;
+			return undefined;
+		}
+	}
+
 	const mod = {
 		version: VERSION,
+		ext: ext,
 		settings: sanitizeSettings(null),
 		state: state,
 		init: function () {
@@ -1319,6 +1355,10 @@
 			endPetSession();
 			return;
 		}
+		if (askAddOn('petWindow', { key: key }) === false) {
+			endPetSession();
+			return;
+		}
 
 		let session = state.petSession;
 		if (!session) {
@@ -1466,6 +1506,13 @@
 
 	// Whether the strategy would buy or sell this stock at today's price, and why: { action, reason }.
 	function tradeSignal(M, good) {
+		const signal = ownTradeSignal(M, good);
+		const picked = askAddOn('stockSignal', { M: M, good: good, signal: signal });
+		if (!picked || ['buy', 'sell', ''].indexOf(picked.action) === -1) return signal;
+		return { action: picked.action, reason: String(picked.reason || 'add-on') };
+	}
+
+	function ownTradeSignal(M, good) {
 		const s = settings();
 		const price = M.getGoodPrice(good);
 		if (usesGuideRules() && price < 5) return { action: 'buy', reason: 'under $5' };
@@ -1663,8 +1710,17 @@
 		return 2 * scale * (Math.sqrt(M.magicM) - Math.sqrt(Math.max(0, M.magic))) / (0.002 * Game.fps);
 	}
 
+	// The spell to cast once the meter is full: the player's setting, unless an add-on picks another one
+	// or, with '', none for now.
+	function spellChoice(M) {
+		const setting = settings().grimoireSpell;
+		const picked = askAddOn('grimoireSpell', { M: M, spell: setting });
+		if (picked === undefined) return { spell: M.spells[setting], byAddOn: false };
+		return { spell: hasKey(M.spells, picked) ? M.spells[picked] : null, byAddOn: true };
+	}
+
 	function castSpell(M, spell) {
-		const name = GRIMOIRE_SPELLS[settings().grimoireSpell];
+		const name = spell.name;
 		const cookiesBefore = Game.cookies;
 		const shimmersBefore = Game.shimmers.slice();
 		// The spell button may be hidden (panel closed); skip the sparkle the game would draw on it.
@@ -1699,12 +1755,15 @@
 				state.spellCookie = summoned || null;
 				state.lastCast = `Cast ${name}: golden cookie summoned`;
 			}
-		} else {
+		} else if (spell === M.spells['conjure baked goods']) {
 			// Conjure Baked Goods adds cookies on a success, and takes some and starts a Clot on a backfire.
 			const change = Game.cookies - cookiesBefore;
 			state.lastCast = backfired ?
 				`Cast ${name}: backfired (Clot, lost ${Beautify(Math.max(0, -change))} cookies)` :
 				`Cast ${name}: +${Beautify(Math.max(0, change))} cookies`;
+		} else {
+			// Any other spell is one an add-on picked.
+			state.lastCast = `Cast ${name}: ${backfired ? 'backfired' : 'done'}`;
 		}
 		debugLog(state.lastCast);
 		return true;
@@ -1728,7 +1787,7 @@
 		}
 		const M = grimoire();
 		if (!M || !settings().autoCast) return;
-		const spell = M.spells[settings().grimoireSpell];
+		const spell = spellChoice(M).spell;
 		if (spell && !castHoldReason(M, spell)) castSpell(M, spell);
 	}
 
@@ -2203,15 +2262,20 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		const s = settings();
 		const M = grimoire();
 		if (!M) return s.autoCast ? ['Grimoire: not unlocked yet (the Wizard tower needs a level, bought with a sugar lump)'] : [];
-		const name = GRIMOIRE_SPELLS[s.grimoireSpell];
 		const full = M.magic >= M.magicM;
 		let line = `Grimoire: magic ${Math.floor(M.magic)} / ${M.magicM}, ` +
 			(full ? 'full. ' : `full in ${formatDuration(secondsToFullMagic(M) * 1000)}. `);
 		if (!s.autoCast) {
 			line += 'Auto-cast off.';
 		} else {
-			const hold = castHoldReason(M, M.spells[s.grimoireSpell]);
-			line += hold ? `${name}: ${hold}.` : `Casting ${name}.`;
+			const choice = spellChoice(M);
+			if (!choice.spell) {
+				line += 'An add-on is holding the cast.';
+			} else {
+				const name = choice.spell.name + (choice.byAddOn ? ' (picked by an add-on)' : '');
+				const hold = castHoldReason(M, choice.spell);
+				line += hold ? `${name}: ${hold}.` : `Casting ${name}.`;
+			}
 		}
 		if (state.lastCast) line += ` Last: ${state.lastCast}.`;
 		return [line];

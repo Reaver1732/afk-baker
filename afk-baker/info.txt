@@ -3,7 +3,7 @@
 	"ID": "afk baker",
 	"Author": "Reaver",
 	"Description": "Plays Cookie Clicker while you're away: autoclicker, golden cookies, reindeer, wrinklers, fortunes, Cookie Monster-driven auto-buy, sugar lump harvesting and building levels, dragon training, auras and petting, Stock Market trading, Grimoire spells, and auto-ascend. Requires Cookie Monster.",
-	"ModVersion": 1.9,
+	"ModVersion": "1.10.0",
 	"GameVersion": 2.053,
 	"Date": "03/10/2026",
 	"Dependencies": ["cookie monster"],
