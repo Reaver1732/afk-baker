@@ -1,6 +1,6 @@
 # AFK Baker
 
-A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building (1, 10 or 100 at a time) or upgrade according to [Cookie Monster](https://steamcommunity.com/sharedfiles/filedetails/?id=2685721341), harvests and spends sugar lumps, trains Krumblor the dragon, trades on the Stock Market, and ascends when you reach a prestige goal.
+A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building (1, 10 or 100 at a time) or upgrade according to [Cookie Monster](https://steamcommunity.com/sharedfiles/filedetails/?id=2685721341), harvests and spends sugar lumps, trains Krumblor the dragon, trades on the Stock Market, casts Grimoire spells, and ascends when you reach a prestige goal.
 
 It uses only the game's built-in mod API (`Game.registerMod`). CCSE is not needed.
 
@@ -11,7 +11,7 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
 **Clickers**
 - **Big cookie autoclicker**: set the clicks per second (default 30, 0 turns it off, maximum 50, which is the game's own limit). It keeps clicking while the window is minimized. When the game slows down in the background, the mod sends the missed clicks as one bigger click. Your cookie click count and hand-made cookies still count every one of them.
 - **Mute big cookie click sound** (on by default): silences only the big cookie's click sound, for your own clicks and the autoclicker's. Golden cookies, buying and every other game sound play as normal, and the game's volume is not changed.
-- **Golden cookies**: clicked as soon as they appear. A separate switch covers wrath cookies.
+- **Golden cookies**: clicked as soon as they appear. A separate switch covers wrath cookies. The one exception is the wrath cookie from a backfired Grimoire spell, which is left alone (see Grimoire below).
 - **Reindeer**: clicked as soon as they appear.
 - **Wrinklers**: choose one of three modes. During a run, shiny wrinklers are always left alone.
   - **Feed, pop before ascending** (default): wrinklers stay on the cookie and keep feeding.
@@ -25,7 +25,7 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
 **Auto-buy**
 - Picks the item with the lowest payback period (PP) according to Cookie Monster: any upgrade, or 1, 10 or 100 of any building. A bundle of 10 or 100 is bought in one purchase through the game's own bulk buy. The store's Buy/Sell mode and bulk setting are left as you had them. If it can't afford the best item yet, it waits and saves up rather than buying something worse.
 - While it's waiting it checks about once a second. After each purchase it buys again as soon as Cookie Monster has recalculated (about 15 purchases a second when there's a lot to buy), and it never buys twice using the same out-of-date data.
-- **Mute auto-buy purchase sounds** (on by default): AFK Baker's own purchases, building level-ups, dragon training, dragon petting, stock trades, broker hires and office upgrades are silent. Your manual purchases, golden cookies and every other sound play as normal, and the volume isn't changed.
+- **Mute auto-buy purchase sounds** (on by default): AFK Baker's own purchases, building level-ups, dragon training, dragon petting, stock trades, broker hires, office upgrades and spell casts are silent. Your manual purchases, golden cookies and every other sound play as normal, and the volume isn't changed.
 - If the best item can't be bought at all (the purchase fails, the game refuses it, or Cookie Monster's price for it stays out of date), it skips that item for a minute and moves on to the next best.
 - **Cookie reserve**: how many cookies to keep banked. Lucky and Lucky + Frenzy are the bank sizes needed for a full Lucky payout.
   - **Off** (default): no reserve. Updating from 1.2 or earlier switches the reserve to Off once. After that, your choice is kept.
@@ -105,8 +105,8 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
   - The secondary aura is only used once the dragon is fully trained.
   - Setting an aura costs **one of your highest-tier building** (the game's rule), so the mod only changes an aura when your pick isn't active. Slot order makes no difference in the game, so a pick that's already in either slot is left where it is, and auras are never swapped back and forth. The same aura can't be picked twice.
 - **Auto-pet dragon** (off by default): needs the heavenly upgrade "Pet the dragon" and a dragon at level 8 or more.
-  - Which drop you can get depends on the quarter of the hour, so finding all four takes up to about 45 minutes. The mod pets only during a quarter whose drop is still missing, and stops for good once all four are found.
-  - The game only allows petting with the dragon panel open, so the mod opens it while it pets (usually a few seconds), then puts back whatever you had open before: Santa's panel, the dragon's, or nothing. Training does the same.
+  - Which drop you can get depends on the quarter of the hour, so finding all four takes up to about 45 minutes. Which quarter gives which drop is decided by the save's seed, and **the mod doesn't read the seed**. It pets in every quarter-hour until a drop appears, or until about 100 pets have passed without one (that quarter's drop is then almost certainly one you already have), and then waits for the next quarter. It stops for good once all four are found.
+  - The game only allows petting with the dragon panel open, so the mod opens it while it pets (a few seconds when a drop comes, about ten when it doesn't), then puts back whatever you had open before: Santa's panel, the dragon's, or nothing. Training does the same.
   - Dragon fang and Dragon teddy bear have no payback period, so auto-pet buys those two itself, respecting the cookie reserve. Dragon scale and Dragon claw are left to auto-buy.
 
 **Stock Market** (the Bank minigame; nothing happens until it's unlocked by giving the Bank a level)
@@ -160,6 +160,18 @@ How the market works, in short:
   - The Cursor level is a requirement only. The mod **never spends sugar lumps** for it; it waits until Cursor has the level (add Cursor to the lump priority list if you want that).
   - Brokers and the office have no game function, only buttons. The mod presses the game's own buttons, which works with the Bank panel closed, so the panel is never opened.
 
+**Grimoire** (the Wizard tower minigame; nothing happens until it's unlocked by giving the Wizard tower a level)
+
+- **Auto-cast spell** (off by default): casts one spell of your choice with the game's own casting function.
+  - **Force the Hand of Fate** (default) summons a golden cookie, which the mod's golden cookie clicker then clicks. It costs 10 magic plus 60% of your max magic, and backfires 15% of the time.
+  - **Conjure Baked Goods** gives 30 minutes of CpS, but **capped at 15% of your bank**, so it's weak when auto-buy keeps the bank low. It costs 2 magic plus 40% of your max, and backfires 15% of the time (a 15-minute Clot, and it takes cookies).
+- **It casts when the magic meter is full.** Magic regenerates faster the fuller the meter is and stops at full, so casting from a full meter gives the most casts and wastes nothing. For example, with 600 Wizard towers (max magic 106), Force the Hand of Fate comes round every 26 minutes cast from full, against 49 minutes if it were cast as soon as it's affordable.
+- **It holds the cast while the backfire chance is raised**, which the spell's tooltip shows: a golden or wrath cookie already on screen adds 15% each to Force the Hand of Fate, and the Magic inept buff multiplies every spell's chance by 5.
+- **A backfired Force the Hand of Fate** summons a wrath cookie, usually a Clot or a Ruin. The mod leaves that one cookie alone, even with "Include wrath cookies" on. Other wrath cookies are clicked as usual.
+- It holds Force the Hand of Fate while **golden cookie clicking is off**, because nothing would click the summoned cookie. The status line says so.
+- It doesn't cast during the ascend animation, on the ascension screen, or in a Born again run. Your max magic depends on how many Wizard towers you own, so it's low at the start of each run, and the status line says when it's too low for the spell.
+- **No cheating.** The same rule as the Stock Market: the mod only uses what a player can see, which here is the magic meter, the spell's cost, the backfire chance in its tooltip, the cookies on screen and your buffs. The game decides every spell's outcome in advance from the run's seed and your lifetime spell count, which is what spell planners read. AFK Baker never reads either one, never simulates a cast, and never looks at what a summoned cookie will do before it's clicked. It learns of a backfire the way you do, from the game's own backfire announcement.
+
 **Auto-ascend**
 - The threshold is either **prestige gained this run** or **total prestige level after ascending**. It uses the same numbers as the game's Legacy button.
 - When you reach it, the mod ascends. It never reincarnates, so you choose your heavenly upgrades yourself.
@@ -182,7 +194,12 @@ The Options section also shows a live status line:
 - the next lump spend and how many lumps it still needs, the lumps needed to finish the whole priority list, and the last level-up, e.g. `Next: Wizard tower to level 3, 2 more lumps needed. 9 lumps to finish the list`
 - the dragon's level and auras, and the next training step with its cost and what it's waiting for, e.g. `Next: sacrifice 100 Farms (rebuy cost 14 min of CpS, waiting for under 10 min)`; with auto-pet on, how many drops are found and which one it's waiting for
 - the stock market: shares held and what they're worth, the game's profit figure for this run, the market budget (`Budget $4,200 of $18,000`), the strategy in use, and the last trade with the rule that triggered it, e.g. `Bought 120 CHC at $8.40 (resting $21.00; 30% of resting or less)`; with brokers or the office on, a second line shows how many brokers you have, the current fee, and what the next broker or office upgrade is waiting for
+- the Grimoire: magic (current / max), the time until it's full, what the cast is waiting for, and the last cast with its result, e.g. `Cast Force the Hand of Fate: Frenzy`. The result appears once the summoned cookie has been clicked
 - your progress toward the ascend threshold, plus the guard warning when it's active
+
+## Only what you can see
+
+Everything AFK Baker decides, it decides from information a player can see on screen: prices, meters, costs, tooltips, buffs and what is in the store, plus fixed formulas anyone can look up, such as a stock's resting value. It never reads the game's hidden state to predict an outcome. In particular, no code in the mod reads the save's seed, the lifetime spell count, a golden cookie's effect before it is clicked, or the Stock Market's hidden modes and momentum. The game's own functions use those when the mod asks the game to cast a spell or pet the dragon, exactly as they do when you click.
 
 ## Requirements
 

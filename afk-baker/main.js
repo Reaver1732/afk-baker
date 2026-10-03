@@ -7,7 +7,7 @@
 	'use strict';
 
 	const MOD_ID = 'afk baker';
-	const VERSION = '1.8.0';
+	const VERSION = '1.9.0';
 	// Settings saved before a default changed are reset to the new default:
 	// v1 had auto-ascend on, v2 had Elder Pledge on, v3 had the Auto reserve.
 	const SETTINGS_VERSION = 4;
@@ -43,11 +43,17 @@
 		restingGuide: 'Resting value + guide rules',
 		resting: 'Resting value',
 	};
+	// Keyed as in the Grimoire's M.spells.
+	const GRIMOIRE_SPELLS = {
+		'hand of fate': 'Force the Hand of Fate',
+		'conjure baked goods': 'Conjure Baked Goods',
+	};
 	const CYCLE_OPTIONS = {
 		reserveMode: RESERVE_MODES,
 		wrinklerMode: WRINKLER_MODES,
 		fortuneMode: FORTUNE_MODES,
 		marketStrategy: MARKET_STRATEGIES,
+		grimoireSpell: GRIMOIRE_SPELLS,
 		ascendMode: ASCEND_MODES,
 	};
 
@@ -84,13 +90,35 @@
 	// Game.UpgradeDragon plays shimmerClick; Game.ClickSpecialPic (petting) plays a click and a growl.
 	const DRAGON_SOUND = /^snd\/(shimmerClick|click\d|growl)\.mp3$/;
 	const PET_INTERVAL_MS = 100;
-	// A pet has a 1 in 20 chance of a drop, so this many pets without one means the drop isn't coming.
-	const MAX_PETS_PER_WINDOW = 400;
+	// A pet has a 1 in 20 chance of a drop, so after this many pets in one quarter-hour without one,
+	// that quarter's drop is almost certainly one already found (an available drop is missed under 1% of the time).
+	const MAX_PETS_PER_WINDOW = 100;
 	const DRAGON_DROPS = ['Dragon scale', 'Dragon claw', 'Dragon fang', 'Dragon teddy bear'];
 	// These two have no CpS or click effect, so the PP buyer never picks them; auto-pet buys them itself.
 	const DRAGON_DROPS_WITHOUT_PP = ['Dragon fang', 'Dragon teddy bear'];
 	// Prestige can pass 2^53, so the threshold is a plain number, not a safe integer.
 	const MAX_ASCEND_THRESHOLD = 1e300;
+	const GRIMOIRE_CHECK_INTERVAL_MS = 1000;
+	// M.castSpell plays spell.mp3 on a success and spellFail.mp3 on a backfire.
+	const SPELL_SOUND = /^snd\/(spell|spellFail)\.mp3$/;
+	// What a clicked golden cookie turned out to be (Game.shimmerTypes.golden.last), in the game's own words.
+	const GOLDEN_EFFECT_NAMES = {
+		'frenzy': 'Frenzy',
+		'multiply cookies': 'Lucky',
+		'click frenzy': 'Click frenzy',
+		'building special': 'Building special',
+		'cookie storm': 'Cookie storm',
+		'cookie storm drop': 'Cookie storm drop',
+		'blab': 'nothing (a blab)',
+		'free sugar lump': 'Free sugar lump',
+		'dragon harvest': 'Dragon Harvest',
+		'dragonflight': 'Dragonflight',
+		'chain cookie': 'Cookie chain',
+		'clot': 'Clot',
+		'ruin cookies': 'Ruin',
+		'cursed finger': 'Cursed finger',
+		'blood frenzy': 'Elder frenzy',
+	};
 	const MARKET_CHECK_INTERVAL_MS = 1000;
 	// M.buyGood plays cashOut, M.sellGood cashIn, and the broker and office buttons cashIn2.
 	const MARKET_SOUND = /^snd\/cash(In|In2|Out)\.mp3$/;
@@ -141,6 +169,8 @@
 		autoBrokers: false,
 		autoOffice: false,
 		officeMinutes: 30,
+		autoCast: false,
+		grimoireSpell: 'hand of fate',
 		autoAscend: false,
 		ascendMode: 'gained',
 		ascendThreshold: 1000,
@@ -261,13 +291,19 @@
 		lastDragonAction: '',
 		// While petting: the special panel to put back afterwards, and how many pets this window has had.
 		petSession: null,
-		petGivenUpWindow: '',
-		dropOrder: { seed: null, order: [] },
+		// The quarter-hour that has given its drop, or been petted enough without one.
+		petDoneWindow: '',
 		nextMarketCheckAt: 0,
 		lastTrade: '',
 		lastMarketAction: '',
 		// Set once the auto-ascend threshold is met: the market only sells from then on.
 		ascendPending: false,
+		nextGrimoireCheckAt: 0,
+		lastCast: '',
+		// The golden cookie the last Force the Hand of Fate summoned, until it's clicked or gone.
+		spellCookie: null,
+		// Wrath cookies summoned by a backfired spell; the clicker leaves these alone.
+		backfiredCookies: new WeakSet(),
 		ascendTriggered: false,
 		// Set when the threshold was already met at load or by a settings change; cleared by re-arming.
 		ascendWarning: false,
@@ -341,6 +377,7 @@
 			runLumps(now);
 			runDragon(now);
 			runMarket(now);
+			runGrimoire(now);
 			checkAutoAscend();
 			refreshStatusLine(now);
 		} catch (e) {
@@ -357,6 +394,7 @@
 		state.skipUntil = {};
 		forgetDragonRun();
 		forgetMarketRun();
+		forgetGrimoireRun();
 	}
 
 	function onReset() {
@@ -366,6 +404,12 @@
 		state.skipUntil = {};
 		forgetDragonRun();
 		forgetMarketRun();
+		forgetGrimoireRun();
+	}
+
+	function forgetGrimoireRun() {
+		state.lastCast = '';
+		state.spellCookie = null;
 	}
 
 	// The game has already wiped the market (M.reset): holdings, brokers, office and profit.
@@ -379,7 +423,7 @@
 	// The game has already reset the dragon and closed the special panel, so there's nothing to put back.
 	function forgetDragonRun() {
 		state.petSession = null;
-		state.petGivenUpWindow = '';
+		state.petDoneWindow = '';
 		state.lastDragonAction = '';
 	}
 
@@ -456,12 +500,15 @@
 		for (const shimmer of Game.shimmers.slice()) {
 			if (shimmer.type === 'golden') {
 				if (!s.clickGolden || (shimmer.wrath && !s.clickWrath)) continue;
+				// A backfired spell's wrath cookie is mostly harmful; it's left to expire.
+				if (state.backfiredCookies.has(shimmer)) continue;
 			} else if (shimmer.type === 'reindeer') {
 				if (!s.clickReindeer) continue;
 			} else {
 				continue;
 			}
 			shimmer.pop();
+			if (shimmer === state.spellCookie) noteSpellCookieClicked();
 		}
 	}
 
@@ -1232,21 +1279,14 @@
 		return hasDragonEgg() && !!Game.Has('Pet the dragon') && Game.dragonLevel >= 8;
 	}
 
-	// Which drop each quarter of the hour gives. Mirrors Game.ClickSpecialPic: the four drops are
-	// shuffled with the run's seed, then picked by the current minute.
-	function dragonDropOrder() {
-		if (state.dropOrder.seed !== Game.seed) {
-			Math.seedrandom(Game.seed + '/dragonTime');
-			const order = shuffle(DRAGON_DROPS.slice());
-			Math.seedrandom();
-			state.dropOrder = { seed: Game.seed, order: order };
-		}
-		return state.dropOrder.order;
+	function dropsFound() {
+		return DRAGON_DROPS.filter(isDropFound);
 	}
 
-	function dropWindow(date) {
-		const index = Math.floor((date.getMinutes() / 60) * DRAGON_DROPS.length);
-		return { key: `${date.getHours()}:${index}`, index: index, drop: dragonDropOrder()[index] };
+	// The quarter of the hour the clock is in. The game gives a different drop in each quarter; which
+	// one is decided by the run's seed, which the mod doesn't read. It simply tries every quarter.
+	function petWindowKey(date) {
+		return `${date.getHours()}:${Math.floor(date.getMinutes() / 15)}`;
 	}
 
 	function petDragon() {
@@ -1268,41 +1308,40 @@
 	}
 
 	// Petting only works with the dragon panel open (Game.ClickSpecialPic checks for it), so the panel
-	// is opened for as long as the current quarter-hour's drop is still missing, then the panel the
-	// player had open before is put back.
+	// is opened while the mod pets, then the panel the player had open before is put back. It pets in
+	// each quarter-hour until a drop appears or enough pets have passed without one, then waits for the
+	// next quarter, and stops for good once all four drops are found.
 	function runAutoPet(now) {
 		if (now < state.nextPetAt) return;
 		state.nextPetAt = now + PET_INTERVAL_MS;
-		if (!settings().autoPetDragon || !canPetForDrops()) {
-			endPetSession();
-			return;
-		}
-		const current = dropWindow(new Date(now));
-		if (isDropFound(current.drop) || state.petGivenUpWindow === current.key) {
+		const key = petWindowKey(new Date(now));
+		if (!settings().autoPetDragon || !canPetForDrops() || dropsFound().length === DRAGON_DROPS.length || state.petDoneWindow === key) {
 			endPetSession();
 			return;
 		}
 
 		let session = state.petSession;
 		if (!session) {
-			session = state.petSession = { restoreTab: Game.specialTab, windowKey: current.key, pets: 0 };
+			session = state.petSession = { restoreTab: Game.specialTab, windowKey: key, pets: 0 };
 		} else if (Game.specialTab !== 'dragon') {
 			// The player switched panels during the session; that's the one to put back.
 			session.restoreTab = Game.specialTab;
 		}
-		if (session.windowKey !== current.key) {
-			session.windowKey = current.key;
+		if (session.windowKey !== key) {
+			session.windowKey = key;
 			session.pets = 0;
 		}
 		if (Game.specialTab !== 'dragon' || !document.getElementById('specialPic')) showSpecialPanel('dragon');
+		const foundBefore = dropsFound();
 		petDragon();
 		session.pets++;
-		if (isDropFound(current.drop)) {
-			state.lastDragonAction = `The dragon dropped ${current.drop}`;
+		const dropped = dropsFound().filter(function (name) { return foundBefore.indexOf(name) === -1; })[0];
+		if (dropped) {
+			state.lastDragonAction = `The dragon dropped ${dropped}`;
 			debugLog(state.lastDragonAction);
-		} else if (session.pets >= MAX_PETS_PER_WINDOW) {
-			state.petGivenUpWindow = current.key;
 		}
+		// A quarter-hour only ever gives one particular drop, so it's done once that drop has appeared.
+		if (dropped || session.pets >= MAX_PETS_PER_WINDOW) state.petDoneWindow = key;
 	}
 
 	// Dragon scale and Dragon claw have a PP and are left to the PP buyer.
@@ -1579,6 +1618,118 @@
 		if (s.autoBrokers) hireBroker(M);
 		// The sacrificed Cursors change CpS, so the PP buyer waits for fresh data.
 		if (s.autoOffice && upgradeOffice(M)) noteGameChanged();
+	}
+
+	/* =====================================================================
+	   GRIMOIRE (the Wizard tower minigame, minigameGrimoire.js)
+	   Casting only uses what a player can see: the magic meter, the spell's cost, the backfire chance
+	   its tooltip shows, golden cookies on screen and active buffs. Spell outcomes are fixed in advance
+	   by the run's seed and the lifetime spell count (M.castSpell seeds the random numbers with them);
+	   the mod never reads either, never simulates a cast, and never reads a summoned cookie's hidden
+	   effect. A result is only reported once the game has shown it.
+	   ===================================================================== */
+
+	// The minigame once the Wizard tower has a level and its script has loaded. The game doesn't run
+	// minigames in a Born again run.
+	function grimoire() {
+		const tower = Game.Objects['Wizard tower'];
+		return tower && Game.isMinigameReady(tower) && !isBornAgain() ? tower.minigame : null;
+	}
+
+	// Why the backfire chance is above its normal value right now, or '' if it isn't. Each golden or
+	// wrath cookie on screen adds to Force the Hand of Fate's chance (the spell's own failFunc), and the
+	// Magic inept buff multiplies every spell's chance by 5.
+	function raisedBackfireReason(spell) {
+		if (Game.hasBuff('Magic inept')) return 'the Magic inept buff raises the backfire chance';
+		if (spell.failFunc && spell.failFunc(0) > 0) return 'a golden cookie on screen raises the backfire chance';
+		return '';
+	}
+
+	// Why the spell isn't being cast right now, or '' if it can be. Magic regenerates faster the fuller
+	// the meter is and stops at full, so casting from a full meter gives the most casts.
+	function castHoldReason(M, spell) {
+		const cost = M.getSpellCost(spell);
+		if (cost > M.magicM) return `max magic is too low for this spell (it costs ${Beautify(cost)})`;
+		if (spell === M.spells['hand of fate'] && !settings().clickGolden) return 'golden cookie clicking is off, so the summoned cookie would go to waste';
+		if (M.magic < M.magicM) return 'waiting for full magic';
+		return raisedBackfireReason(spell);
+	}
+
+	// Seconds until the meter is full. Mirrors M.logic: each frame adds 0.002 x sqrt(magic / max), with
+	// the max counted as at least 100.
+	function secondsToFullMagic(M) {
+		if (M.magic >= M.magicM) return 0;
+		const scale = Math.sqrt(Math.max(M.magicM, 100));
+		return 2 * scale * (Math.sqrt(M.magicM) - Math.sqrt(Math.max(0, M.magic))) / (0.002 * Game.fps);
+	}
+
+	function castSpell(M, spell) {
+		const name = GRIMOIRE_SPELLS[settings().grimoireSpell];
+		const cookiesBefore = Game.cookies;
+		const shimmersBefore = Game.shimmers.slice();
+		// The spell button may be hidden (panel closed); skip the sparkle the game would draw on it.
+		const savedSparkle = Game.SparkleAt;
+		if (!M.parent.onMinigame) Game.SparkleAt = function () {};
+		// The game announces a backfire: M.castSpell plays spellFail.mp3 for one and spell.mp3 for a
+		// success. Listen for which, and mute both under the mute setting.
+		let backfired = false;
+		const originalPlaySound = window.PlaySound;
+		window.PlaySound = function (url) {
+			if (url === 'snd/spellFail.mp3') backfired = true;
+			if (settings().muteBuySounds && typeof url === 'string' && SPELL_SOUND.test(url)) return 0;
+			return originalPlaySound.apply(this, arguments);
+		};
+		let cast;
+		try {
+			cast = M.castSpell(spell);
+		} finally {
+			window.PlaySound = originalPlaySound;
+			Game.SparkleAt = savedSparkle;
+		}
+		if (!cast) return false;
+
+		if (spell === M.spells['hand of fate']) {
+			// The cookie the spell just summoned. What it will do stays unknown until it's clicked.
+			const summoned = Game.shimmers.filter(function (shimmer) { return shimmersBefore.indexOf(shimmer) === -1; })[0];
+			if (backfired) {
+				if (summoned) state.backfiredCookies.add(summoned);
+				state.spellCookie = null;
+				state.lastCast = `Cast ${name}: backfired (wrath cookie left alone)`;
+			} else {
+				state.spellCookie = summoned || null;
+				state.lastCast = `Cast ${name}: golden cookie summoned`;
+			}
+		} else {
+			// Conjure Baked Goods adds cookies on a success, and takes some and starts a Clot on a backfire.
+			const change = Game.cookies - cookiesBefore;
+			state.lastCast = backfired ?
+				`Cast ${name}: backfired (Clot, lost ${Beautify(Math.max(0, -change))} cookies)` :
+				`Cast ${name}: +${Beautify(Math.max(0, change))} cookies`;
+		}
+		debugLog(state.lastCast);
+		return true;
+	}
+
+	// The clicker has just popped the summoned cookie, so the game has shown what it was.
+	function noteSpellCookieClicked() {
+		state.spellCookie = null;
+		const effect = Game.shimmerTypes['golden'].last;
+		state.lastCast = `Cast ${GRIMOIRE_SPELLS['hand of fate']}: ${GOLDEN_EFFECT_NAMES[effect] || effect}`;
+		debugLog(state.lastCast);
+	}
+
+	function runGrimoire(now) {
+		if (now < state.nextGrimoireCheckAt) return;
+		state.nextGrimoireCheckAt = now + GRIMOIRE_CHECK_INTERVAL_MS;
+		if (state.spellCookie && Game.shimmers.indexOf(state.spellCookie) === -1) {
+			// It left the screen without the mod's clicker popping it.
+			state.spellCookie = null;
+			state.lastCast += ' (not clicked by the mod)';
+		}
+		const M = grimoire();
+		if (!M || !settings().autoCast) return;
+		const spell = M.spells[settings().grimoireSpell];
+		if (spell && !castHoldReason(M, spell)) castSpell(M, spell);
 	}
 
 	/* =====================================================================
@@ -1975,23 +2126,16 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 	function petLine() {
 		if (!Game.Has('Pet the dragon')) return 'Dragon petting: needs the heavenly upgrade "Pet the dragon"';
 		if (!canPetForDrops()) return 'Dragon petting: drops start at dragon level 8';
-		const found = DRAGON_DROPS.filter(isDropFound).length;
+		const found = dropsFound().length;
 		if (found === DRAGON_DROPS.length) {
 			const toBuy = DRAGON_DROPS_WITHOUT_PP.filter(function (name) { return isInStore(Game.Upgrades[name]); });
 			return 'Dragon petting: all four drops found' + (toBuy.length ? `, buying ${toBuy.join(' and ')} when affordable` : '');
 		}
 		const now = new Date();
-		const current = dropWindow(now);
-		const order = dragonDropOrder();
-		let waiting = 'no drop to wait for this hour';
-		for (let ahead = 0; ahead < order.length; ahead++) {
-			const drop = order[(current.index + ahead) % order.length];
-			if (isDropFound(drop)) continue;
-			if (ahead === 0 && state.petGivenUpWindow === current.key) continue;
-			const minutes = 15 * ahead - (now.getMinutes() % 15);
-			waiting = ahead === 0 ? `petting for ${drop}` : `waiting for the ${drop} window (in ${minutes} min)`;
-			break;
-		}
+		const pets = state.petSession ? state.petSession.pets : 0;
+		const waiting = state.petDoneWindow === petWindowKey(now) ?
+			`waiting for the next quarter-hour (in ${15 - now.getMinutes() % 15} min)` :
+			`petting (${pets} of up to ${MAX_PETS_PER_WINDOW} pets this quarter-hour)`;
 		return `Dragon petting: ${found} of ${DRAGON_DROPS.length} drops found, ${waiting}`;
 	}
 
@@ -2055,6 +2199,24 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		return s.autoTrade && (s.autoBrokers || s.autoOffice) ? [line, marketStaffLine(M)] : [line];
 	}
 
+	function grimoireLines() {
+		const s = settings();
+		const M = grimoire();
+		if (!M) return s.autoCast ? ['Grimoire: not unlocked yet (the Wizard tower needs a level, bought with a sugar lump)'] : [];
+		const name = GRIMOIRE_SPELLS[s.grimoireSpell];
+		const full = M.magic >= M.magicM;
+		let line = `Grimoire: magic ${Math.floor(M.magic)} / ${M.magicM}, ` +
+			(full ? 'full. ' : `full in ${formatDuration(secondsToFullMagic(M) * 1000)}. `);
+		if (!s.autoCast) {
+			line += 'Auto-cast off.';
+		} else {
+			const hold = castHoldReason(M, M.spells[s.grimoireSpell]);
+			line += hold ? `${name}: ${hold}.` : `Casting ${name}.`;
+		}
+		if (state.lastCast) line += ` Last: ${state.lastCast}.`;
+		return [line];
+	}
+
 	function statusLines() {
 		const s = settings();
 		const progress = prestigeProgress();
@@ -2068,7 +2230,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			`Auto-buy: ${state.buyStatus}`,
 			`Cookie reserve: ${Beautify(reserveAmount())} (${reserveLabel()})`,
 			wrinklerLine(),
-		].concat(lumpLines(), dragonLines(), marketLines(), [ascendLine]);
+		].concat(lumpLines(), dragonLines(), marketLines(), grimoireLines(), [ascendLine]);
 		if (s.autoAscend && state.ascendWarning) {
 			lines.push('WARNING: Threshold already reached. Toggle auto-ascend off and on to confirm.');
 		}
@@ -2128,6 +2290,13 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			listing(toggleButton('autoBrokers', 'Hire brokers') + note('each cuts the 20% buying fee by a twentieth; hired when the saving on one full warehouse fill covers its price')) +
 			listing(toggleButton('autoOffice', 'Upgrade office') + `<label>when rebuying the Cursors costs less than</label> ${numberInput('officeMinutes', 50)}<label>minutes of CpS</label>`) +
 			listing(note('an office upgrade sacrifices Cursors and needs a Cursor level; the mod never spends sugar lumps for it; brokers and office only run while auto-trade is on')) +
+
+			heading('Grimoire') +
+			listing(toggleButton('autoCast', 'Auto-cast spell') + cycleButton('grimoireSpell', 'Spell')) +
+			listing(note('casts when the magic meter is full: magic regenerates faster the fuller the meter is, so that gives the most casts; nothing happens until the Wizard tower minigame is unlocked')) +
+			listing(note('Force the Hand of Fate summons a golden cookie. It waits while a golden cookie is on screen or Magic inept is active (both raise the backfire chance), and while golden cookie clicking is off. The wrath cookie from a backfire is left alone')) +
+			listing(note('Conjure Baked Goods gives 30 minutes of CpS, but capped at 15% of your bank, so it is weak when auto-buy keeps the bank low')) +
+			listing(note('uses only what a player can see; never reads the seed or predicts what a spell will do')) +
 
 			heading('Auto-ascend') +
 			listing(toggleButton('autoAscend', 'Auto-ascend') + cycleButton('ascendMode', 'Threshold type')) +
