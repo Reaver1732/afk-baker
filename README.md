@@ -6,7 +6,16 @@ It uses only the game's built-in mod API (`Game.registerMod`). CCSE is not neede
 
 ## Features
 
-Every feature can be turned on or off in **Options → AFK Baker**. Settings are saved with your game.
+Every feature can be turned on or off in **AFK Baker's own panel**. Open it with the small **AFK Baker** tab under the news ticker, between Stats and Legacy. Settings are saved with your game.
+
+**The panel**
+- It opens in the middle of the screen, where the game shows Options and Stats. The cookie and the store stay visible and clickable. Opening one of the game's menus closes it, and the x closes it too. The Options menu keeps one line with a button that opens the panel.
+- The dot on the tab shows the state at a glance: green running, yellow paused, red when a safety check or an error stopped something.
+- **Dashboard**: one row per feature with what it is doing now and what it is waiting for. Click a row to open its tab. Each settings tab shows its own rows at the top.
+- **Tabs**: Clickers, Auto-buy, Sugar lumps, Dragon, Stock Market, Grimoire, Auto-ascend and Other. Explanations are behind the "?" next to a setting: hover it. A sub-setting is only shown while the setting it belongs to is on.
+- **Pause all** (top of the panel, on every tab): stops everything AFK Baker does without changing any setting. Resume picks up where it left off. The store ratings keep showing. A pause is not remembered when the game restarts, so a forgotten pause can't silently stop an AFK session.
+- **Settings export and import** (Other tab): Copy gives every setting as one line of text. To import, paste a text and press Check import. It lists what would change and changes nothing until you press Apply. The text is checked the same way a saved game's settings are. Auto-ascend is always imported switched off, so a pasted text can't trigger an ascension.
+- The panel is only redrawn when you do something, so a field you are typing in and a drag in progress are never interrupted.
 
 **Clickers**
 - **Big cookie autoclicker**: set the clicks per second (default 30, 0 turns it off, maximum 50, which is the game's own limit). It keeps clicking while the window is minimized. When the game slows down in the background, the mod sends the missed clicks as one bigger click. Your cookie click count and hand-made cookies still count every one of them.
@@ -33,6 +42,17 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
 - While it's waiting it checks about once a second. After each purchase it buys again as soon as the new payback periods are worked out.
 - **Mute auto-buy purchase sounds** (on by default): AFK Baker's own purchases, building level-ups, dragon training, dragon petting, stock trades, broker hires, office upgrades and spell casts are silent. Your manual purchases, golden cookies and every other sound play as normal, and the volume isn't changed.
 - If the best item can't be bought at all (the purchase fails, or the game refuses it), it skips that item for a minute and moves on to the next best.
+- **Store ratings** (the "Show ratings in the store" setting on the Auto-buy tab): every upgrade in the store gets a small square in its corner, and every building's price takes a color, by how its payback period compares with the best one. The legend is next to the setting.
+  - **Best buy** (gold): the lowest payback period, which is what auto-buy buys next.
+  - **Close to best** (teal): up to 1.5 times the best. **Average** (light blue): up to 5 times. **Poor** (violet): more than 5 times.
+  - **No payback period** (gray): the purchase doesn't raise your income.
+  - **Bought by the research setting** (pale square with a dot): research, while Buy research is on.
+  - **Skipped by AFK Baker** (black and white stripes): never bought. Switches, vaulted upgrades, the never-buy list, and research while Buy research is off.
+  - Hovering an upgrade or a building adds a block to the game's tooltip with the rating in words, the payback period, its rank, how long until you can afford it and, for the gray and striped ones, why. So nothing depends on telling the colors apart. A building's tooltip lists buying 1, 10 and 100.
+  - A building's price shows the rating for the amount the store is set to buy. It replaces the game's green or red price color; the game still dims a building you can't afford.
+  - Click upgrades use their click payback period, the same as auto-buy.
+  - The ratings only read numbers the payback calculation has already worked out. With auto-buy off or paused, the calculation keeps running for them, and nothing is bought.
+  - If Cookie Monster is loaded, the ratings start switched off, because Cookie Monster draws its own colors in the store. You can turn them on anyway; the setting's tooltip says so.
 - **Cookie reserve**: how many cookies to keep banked. Lucky and Lucky + Frenzy are the bank sizes needed for a full Lucky payout.
   - **Off** (default): no reserve. Updating from 1.2 or earlier switches the reserve to Off once. After that, your choice is kept.
   - **Auto**: no reserve for the first 30 minutes of a run, then the same as Lucky. You can change the number of minutes.
@@ -61,7 +81,7 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
   - Upgrades that raise CpS as well (for example cursor upgrades that also boost Cursors) are ranked by their CpS gain.
 - Other upgrades with no CpS effect (infinite PP) are skipped. Research is the exception and has its own switch.
 - Pauses during ascension and for a few seconds after reincarnating.
-- **Safety checks**: before using its numbers, AFK Baker checks that its copy gives the same CpS as the game for your game as it is. If it doesn't (another mod may be changing how CpS is calculated), auto-buy pauses, says so in the status line, and checks again every few seconds. After every purchase it also compares the game's new CpS with what it predicted. A miss is logged to the console with the item and noted in the status line; after 3 misses in the last 10 purchases auto-buy pauses and says why, until you turn it off and on again.
+- **Safety checks**: before using its numbers, AFK Baker checks that its copy gives the same CpS as the game for your game as it is. If it doesn't (another mod may be changing how CpS is calculated), auto-buy pauses, says so on the Dashboard, and checks again every few seconds. After every purchase it also compares the game's new CpS with what it predicted. A miss is logged to the console with the item and noted on the Dashboard; after 3 misses in the last 10 purchases auto-buy pauses and says why, until you turn it off and on again.
 
 **Sugar lumps** (nothing happens until sugar lumps are unlocked on your save, at a billion cookies baked in total)
 - **Auto-harvest sugar lumps** (on by default): harvests the current lump as soon as it's **ripe**, never while it's only mature, because a mature harvest has a 50% chance of giving nothing. It uses the game's own ripe time, which already includes your upgrades, Pantheon and dragon aura, and the game's own harvest (`Game.clickLump`).
@@ -73,7 +93,7 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
   - The same building can appear more than once, for example Farm to 1 early and Farm to 9 later.
   - Levels cost what the game charges: going from level L to L+1 costs L+1 lumps, so level N from 0 costs N×(N+1)/2 in total.
   - It uses the game's own level-up. If the game's "Lump confirmation" option is on, it's switched off just for the mod's own level-up and put back straight away, so your own spending still asks.
-  - Buildings you don't own yet are levelled too, because levels carry over through ascensions. The status line notes it, e.g. `Leveled Wizard tower to 3 (none owned yet)`.
+  - Buildings you don't own yet are levelled too, because levels carry over through ascensions. The Dashboard notes it, e.g. `Leveled Wizard tower to 3 (none owned yet)`.
   - **Keep at least N lumps** (default 0): the mod never spends below this.
   - Paused during a Born again run, like harvesting.
 - **Priority list editor** in the Sugar lumps section:
@@ -83,7 +103,7 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
   - **Drag a row by its ≡ handle** to reorder it.
   - **Edit a target level right in the row.** A valid whole number saves as you type. Anything else is corrected when you leave the field or press Enter: at least 1, at most 1000, decimals rounded down.
   - The Up, Down and Remove buttons and the Add row (a building dropdown and a target level, then Add or Enter) still work for anyone who'd rather not drag. **Reset to default** starts over.
-  - Press Escape to cancel a drag. Dropping outside the list changes nothing, and dragging never clicks the big cookie or anything else in the game. The game's 5-second Options refresh waits until a drag is finished.
+  - Press Escape to cancel a drag. Dropping outside the list changes nothing, and dragging never clicks the big cookie or anything else in the game. The list is only redrawn when you change it, so a drag is never interrupted; its numbers are updated in place.
   - On a narrow window the palette wraps, and each list row takes two lines so nothing scrolls sideways.
   - The default list only unlocks the minigames: Farm 1 (Garden), Temple 1 (Pantheon), Wizard tower 1 (Grimoire), Bank 1 (Stock Market). Add anything else yourself.
   - The list is saved with your other settings. If the saved list is damaged, the default list is used instead.
@@ -147,7 +167,7 @@ How the market works, in short:
     The guide's passive strategy (buy in the bottom 20 to 30% of a stock's own price history, sell in the top 20 to 30%) was tested too and left out. The market resets every ascension, so early in a run there isn't enough history for "cheap" to mean anything yet. Over 12-hour runs it lost money in most runs.
   - Never buys more than the warehouse holds, and only trades stocks whose building you've owned this run.
   - **Never sells at a loss**: it only sells for more than the stock cost, fee included. The game only remembers the last price you bought at, so the mod keeps its own record of what it paid (saved with your settings). Stock you bought by hand is picked up at the game's last purchase price. There's a **Sell at a loss** setting, off by default.
-  - **The market may use up to N% of your bank** (default 25), so it doesn't starve auto-buy. That's counted on your bank above the cookie reserve plus what is already invested. The status line shows it, e.g. `Budget $4,200 of $18,000`, so you can see when the budget is what's holding it back.
+  - **The market may use up to N% of your bank** (default 25), so it doesn't starve auto-buy. That's counted on your bank above the cookie reserve plus what is already invested. The Dashboard shows it, e.g. `Budget $4,200 of $18,000`, so you can see when the budget is what's holding it back.
   - A stock can't be sold in the minute it was bought, or bought in the minute it was sold. That's the game's rule.
   - It never takes loans.
 - **Before auto-ascend**: because ascending wipes your stock, the mod sells all of it right before an auto-ascend, the same way wrinklers are popped first, and buys nothing more once the threshold is reached. This sale ignores the no-loss rule. It can hold the ascend back by up to a minute.
@@ -175,8 +195,8 @@ How the market works, in short:
 - **It casts when the magic meter is full.** Magic regenerates faster the fuller the meter is and stops at full, so casting from a full meter gives the most casts and wastes nothing. For example, with 600 Wizard towers (max magic 106), Force the Hand of Fate comes round every 26 minutes cast from full, against 49 minutes if it were cast as soon as it's affordable.
 - **It holds the cast while the backfire chance is raised**, which the spell's tooltip shows: a golden or wrath cookie already on screen adds 15% each to Force the Hand of Fate, and the Magic inept buff multiplies every spell's chance by 5.
 - **A backfired Force the Hand of Fate** summons a wrath cookie, usually a Clot or a Ruin. The mod leaves that one cookie alone, even with "Include wrath cookies" on. Other wrath cookies are clicked as usual.
-- It holds Force the Hand of Fate while **golden cookie clicking is off**, because nothing would click the summoned cookie. The status line says so.
-- It doesn't cast during the ascend animation, on the ascension screen, or in a Born again run. Your max magic depends on how many Wizard towers you own, so it's low at the start of each run, and the status line says when it's too low for the spell.
+- It holds Force the Hand of Fate while **golden cookie clicking is off**, because nothing would click the summoned cookie. The Dashboard says so.
+- It doesn't cast during the ascend animation, on the ascension screen, or in a Born again run. Your max magic depends on how many Wizard towers you own, so it's low at the start of each run, and the Dashboard says when it's too low for the spell.
 - **No cheating.** The same rule as the Stock Market: the mod only uses what a player can see, which here is the magic meter, the spell's cost, the backfire chance in its tooltip, the cookies on screen and your buffs. The game decides every spell's outcome in advance from the run's seed and your lifetime spell count, which is what spell planners read. AFK Baker never reads either one, never simulates a cast, and never looks at what a summoned cookie will do before it's clicked. It learns of a backfire the way you do, from the game's own backfire announcement.
 
 **Auto-ascend**
@@ -190,26 +210,25 @@ How the market works, in short:
 **Other**
 - **Debug logging**: extra console output. When the auto-buy decision changes, it prints the top 5 candidates (name, amount, PP, price, and why each was chosen or skipped; click upgrades are tagged `click`). It also lists the upgrades filtered out before ranking, and any infinite-PP upgrades that are still being skipped. If Cookie Monster is installed as well, debug logging compares the two: it logs how many payback periods agree within 1% and lists the ones that differ, with the likely reason. AFK Baker never uses Cookie Monster's numbers for its decisions.
 
-The Options section also shows a live status line:
-- what auto-buy is doing. When it's waiting, it shows the target, its price, the reserve and how many more cookies are needed, and says which of these it's waiting on:
-  - **Waiting on the item**: the bank can't cover the item yet, e.g. `saving for 10x Grandma (1.2 trillion) + reserve (8.4 trillion), need 3.1 trillion more`.
-  - **Waiting on reserve**: the item is affordable, but buying it would dip into the reserve.
+The Dashboard shows, for each feature:
+- what auto-buy is doing. When it's waiting, it shows the target and its price, and in the waiting column how many more cookies are needed:
+  - **Saving for** an item: the bank can't cover the item yet, e.g. `Saving for 10x Grandma (1.2 trillion) + reserve (8.4 trillion)`, waiting for `3.1 trillion more cookies`.
+  - **Affordable, but the reserve has to stay banked**: buying it would dip into the reserve.
   - **Working out payback periods**: it is recalculating after something changed. This takes a moment.
-  - **Paused**: a safety check failed. The line says which one and what to do.
+  - **Paused** (red dot): a safety check failed. The row says which one and what to do.
 - your current reserve
 - how many wrinklers are feeding, and how many cookies they would pay out
-- sugar lumps owned, the time until the current lump is ripe, and the last harvest
-- the next lump spend and how many lumps it still needs, the lumps needed to finish the whole priority list, and the last level-up, e.g. `Next: Wizard tower to level 3, 2 more lumps needed. 9 lumps to finish the list`
-- the dragon's level and auras, and the next training step with its cost and what it's waiting for, e.g. `Next: sacrifice 100 Farms (rebuy cost 14 min of CpS, waiting for under 10 min)`; with auto-pet on, how many drops are found and which one it's waiting for
-- the stock market: shares held and what they're worth, the game's profit figure for this run, the market budget (`Budget $4,200 of $18,000`), the strategy in use, and the last trade with the rule that triggered it, e.g. `Bought 120 CHC at $8.40 (resting $21.00; 30% of resting or less)`; with brokers or the office on, a second line shows how many brokers you have, the current fee, and what the next broker or office upgrade is waiting for
-- the Grimoire: magic (current / max), the time until it's full, what the cast is waiting for, and the last cast with its result, e.g. `Cast Force the Hand of Fate: Frenzy`. The result appears once the summoned cookie has been clicked
-- your progress toward the ascend threshold, plus the guard warning when it's active
+- sugar lumps owned, the last harvest, the next lump spend, the lumps needed to finish the whole priority list and the last level-up; in the waiting column, how many lumps are still needed and when the current lump is ripe
+- the dragon's level and auras and the next training step; in the waiting column its cost and what it's waiting for, e.g. `rebuy cost 14 min of CpS, waiting for under 10 min`; with auto-pet on, a second row shows how many drops are found and which one it's waiting for
+- the stock market: shares held and what they're worth, the game's profit figure for this run, the market budget (`Budget $4,200 of $18,000`), the strategy in use, and the last trade with the rule that triggered it, e.g. `Bought 120 CHC at $8.40 (resting $21.00; 30% of resting or less)`; with brokers or the office on, a second row shows how many brokers you have, the current fee, and what the next broker or office upgrade is waiting for
+- the Grimoire: magic (current / max), the spell, what the cast is waiting for, and the last cast with its result, e.g. `Cast Force the Hand of Fate: Frenzy`. The result appears once the summoned cookie has been clicked
+- your progress toward the ascend threshold, plus the guard warning (red dot) when it's active
 
 ## Only what you can see
 
 Everything AFK Baker decides, it decides from information a player can see on screen: prices, meters, costs, tooltips, buffs and what is in the store, plus fixed formulas anyone can look up, such as a stock's resting value. It never reads the game's hidden state to predict an outcome. In particular, no code in the mod reads the save's seed, the lifetime spell count, a golden cookie's effect before it is clicked, or the Stock Market's hidden modes and momentum. The game's own functions use those when the mod asks the game to cast a spell or pet the dragon, exactly as they do when you click.
 
-Other mods can replace a few of AFK Baker's decisions through its extension hooks (`Game.mods['afk baker'].ext`, documented in `main.js`); AFK Baker itself always works as described here.
+Other mods can replace a few of AFK Baker's decisions, and add their own tab and Dashboard row to its panel, through its extension hooks (`Game.mods['afk baker'].ext`, version 2, documented in `main.js`); AFK Baker itself always works as described here.
 
 ## Requirements
 
@@ -226,7 +245,7 @@ Other mods can replace a few of AFK Baker's decisions through its extension hook
    The folder must contain `info.txt` and `main.js`.
 3. Start the game and open **Options → Mods** (the "Manage mods" button).
 4. Enable **AFK Baker**, then restart the game when asked.
-5. Open **Options** and scroll down to the **AFK Baker** section to adjust the settings.
+5. Click the **AFK Baker** tab under the news ticker to open the panel and adjust the settings.
 
 If you use other automation mods (for example FortuneHelper or Grandma's Rolling Pin), disable them so they don't fight over the same purchases and clicks.
 

@@ -170,6 +170,27 @@
 	};
 	const REINCARNATE_GRACE_MS = 3000;
 	const STATUS_REFRESH_MS = 500;
+	// What an exported settings text starts with.
+	const EXPORT_PREFIX = 'AFKB1:';
+	// Below this width the panel's dashboard stacks its columns.
+	const NARROW_PANEL_PX = 520;
+	// Store ratings: a payback period up to this many times the best one is "close to best" or "average".
+	const CLOSE_RATIO = 1.5;
+	const AVERAGE_RATIO = 5;
+	// What each setting is called when an import lists what it would change.
+	const SETTING_LABELS = {
+		clickRate: 'Big cookie clicks per second', muteCookieClick: 'Mute big cookie click sound', clickGolden: 'Golden cookies',
+		clickWrath: 'Include wrath cookies', clickReindeer: 'Reindeer', wrinklerMode: 'Wrinklers', clickFortunes: 'Fortune tickers',
+		fortuneMode: 'Fortune clicks', autoBuy: 'Auto-buy', muteBuySounds: 'Mute auto-buy purchase sounds', reserveMode: 'Cookie reserve',
+		autoReserveMinutes: 'Auto reserve: minutes without a reserve', buyResearch: 'Buy research', elderPledge: 'Elder Pledge',
+		storeOverlay: 'Show ratings in the store', autoHarvestLumps: 'Auto-harvest sugar lumps', autoSpendLumps: 'Auto-spend sugar lumps',
+		keepLumps: 'Lumps to keep', lumpPriority: 'Sugar lump priority list', autoTrainDragon: 'Auto-train dragon',
+		dragonTrainMinutes: 'Dragon training limit, minutes of CpS', dragonAura1: 'Primary aura', dragonAura2: 'Secondary aura',
+		autoPetDragon: 'Auto-pet dragon', autoTrade: 'Auto-trade stocks', marketStrategy: 'Stock strategy', marketBuyPercent: 'Buy at % of resting value',
+		marketSellPercent: 'Sell at % of resting value', marketBankPercent: '% of the bank the market may use', marketSellAtLoss: 'Sell at a loss',
+		autoBrokers: 'Hire brokers', autoOffice: 'Upgrade office', officeMinutes: 'Office upgrade limit, minutes of CpS', autoCast: 'Auto-cast spell',
+		grimoireSpell: 'Spell', autoAscend: 'Auto-ascend', ascendMode: 'Threshold type', ascendThreshold: 'Ascend threshold', debug: 'Debug logging',
+	};
 
 	const DEFAULTS = {
 		clickRate: 30,
@@ -276,6 +297,8 @@
 		const settings = Object.assign({}, DEFAULTS);
 		settings.lumpPriority = sanitizeLumpPriority(raw && raw.lumpPriority);
 		settings.marketBasis = sanitizeMarketBasis(raw && raw.marketBasis);
+		// null until the player chooses: on, unless Cookie Monster is drawing its own store colors.
+		settings.storeOverlay = raw && typeof raw.storeOverlay === 'boolean' ? raw.storeOverlay : null;
 		if (!raw || typeof raw !== 'object') return settings;
 
 		for (const key in DEFAULTS) {
@@ -317,7 +340,14 @@
 		// The Add row of the lump priority list, kept here so menu rebuilds don't lose it.
 		lumpDraft: { building: DEFAULT_LUMP_PRIORITY[0].building, level: '1' },
 		drag: null, // a drag in the lump priority list, from pointerdown until it ends
-		renderPending: false,
+		panelOpen: false,
+		panelTab: 'dashboard',
+		// Pause all: nothing is clicked, bought, traded or cast. Not saved, so a restart always runs.
+		paused: false,
+		importDraft: { text: '', preview: null, error: '' },
+		exportCopied: false,
+		renderedDragonLevel: -1,
+		lastLiveHtml: '',
 		nextDragonCheckAt: 0,
 		nextPetAt: 0,
 		lastDragonAction: '',
@@ -360,11 +390,40 @@
 	     petWindow({ key })                false to skip petting the dragon in the current quarter-hour.
 	                                       `key` is 'hour:quarter'.
 
-	   M is the minigame object. Check ext.apiVersion first; it goes up when the hooks change.
+	   M is the minigame object.
+
+	   Since version 2 an add-on can also have its own tab in AFK Baker's panel:
+
+	     ext.registerTab({ id, title, render(container), status() })
+	                                       id: letters, digits and dashes; title: the tab's label.
+	                                       render fills the empty container each time the tab is drawn, and
+	                                       handles its own clicks. status is optional: it returns the add-on's
+	                                       Dashboard row as text, or { now, wait, state } with state one of
+	                                       'on', 'off', 'wait', 'warn'; null for no row. Returns true if the
+	                                       tab was added.
+	     ext.redraw()                      Redraws the panel, for after the add-on changed one of its settings.
+	     ext.openPanel(id)                 Opens the panel, on the tab with that id if given.
+	     ext.isPaused()                    true while the player has paused AFK Baker. The overrides are not
+	                                       called then; an add-on that acts on its own should hold off too.
+
+	   Check ext.apiVersion first; it goes up when the hooks change. Version 2 added the tab functions and
+	   left the overrides as they were.
 	   ===================================================================== */
 	const ext = {
-		apiVersion: 1,
+		apiVersion: 2,
 		overrides: { grimoireSpell: null, stockSignal: null, petWindow: null },
+		tabs: [],
+		registerTab: function (tab) {
+			if (!tab || typeof tab.id !== 'string' || !/^[A-Za-z0-9-]+$/.test(tab.id) || typeof tab.title !== 'string' || typeof tab.render !== 'function') return false;
+			const taken = TABS.some(function (own) { return own[0] === tab.id; }) || ext.tabs.some(function (other) { return other.id === tab.id; });
+			if (taken) return false;
+			ext.tabs.push({ id: tab.id, title: tab.title, render: tab.render, status: typeof tab.status === 'function' ? tab.status : null });
+			renderMenuSection();
+			return true;
+		},
+		redraw: function () { renderMenuSection(); },
+		openPanel: function (tabId) { openPanel(tabId); },
+		isPaused: function () { return state.paused; },
 	};
 
 	// An add-on's answer for a decision: undefined if there is no add-on for it, or if it threw.
@@ -390,6 +449,7 @@
 			Game.registerHook('reset', onReset);
 			installStyles();
 			installMenuHook();
+			ensurePanel();
 			installClickSoundHook();
 			console.log(`${LOG_PREFIX} v${VERSION} loaded.`);
 		},
@@ -437,6 +497,12 @@
 			}
 			const s = settings();
 			const now = Date.now();
+			if (state.paused) {
+				// The store ratings keep showing, so the payback data is kept current; nothing is done with it.
+				if (isOverlayOn()) refreshPayback(now);
+				refreshStatusLine(now);
+				return;
+			}
 			clickBigCookie(now);
 			if (s.clickGolden || s.clickReindeer) clickShimmers();
 			if (s.wrinklerMode === 'instant') popWrinklers(false);
@@ -1560,6 +1626,8 @@
 			calc.paused = '';
 			calc.recentChecks = [];
 			forgetPurchaseChecks();
+			// The store ratings use the same payback data, whether or not anything is bought with it.
+			if (isOverlayOn()) refreshPayback(now);
 			return;
 		}
 		refreshPayback(now);
@@ -2460,26 +2528,304 @@
 	}
 
 	/* =====================================================================
-	   SETTINGS UI
+	   STORE OVERLAY
+	   Marks each upgrade and colors each building's price by how its payback period compares with the
+	   best one. It only reads what the payback calculator has already worked out: no simulation is run
+	   for it, and drawing is a matter of setting one attribute per store item.
 	   ===================================================================== */
 
-	// There is no menu hook, so the Options menu is extended by wrapping Game.UpdateMenu.
+	// The bands are a ratio to the best payback period, so they mean the same in a small store and a full one.
+	const RATINGS = {
+		best: { label: 'Best buy', legend: 'the lowest payback period: what auto-buy buys next' },
+		close: { label: 'Close to best', legend: `payback period up to ${CLOSE_RATIO} times the best` },
+		average: { label: 'Average', legend: `up to ${AVERAGE_RATIO} times the best` },
+		poor: { label: 'Poor', legend: `more than ${AVERAGE_RATIO} times the best` },
+		none: { label: 'No payback period', legend: "the purchase doesn't raise your income, so it never pays for itself" },
+		research: { label: 'Bought by the research setting', legend: 'research, bought as soon as it is affordable while Buy research is on' },
+		skip: { label: 'Skipped by AFK Baker', legend: 'never bought: switches, vaulted upgrades, the never-buy list, and research while Buy research is off' },
+	};
+	const RATING_ORDER = ['best', 'close', 'average', 'poor', 'none', 'research', 'skip'];
+	const SKIP_REASONS = {
+		'toggle pool': 'it is a switch, not a purchase',
+		'never-buy list': 'it is on the never-buy list',
+		vaulted: 'you put it in the vault',
+		'costs sugar lumps': 'it costs sugar lumps',
+		selector: 'it opens a selection, not a purchase',
+		'already bought': 'it is already bought',
+	};
+	const UPGRADE_BOXES = ['upgrades', 'techUpgrades', 'toggleUpgrades', 'vaultUpgrades'];
+
+	const overlay = {
+		ratings: new Map(), // candidate key -> { rating, pp, rank, tag, why }
+		ranked: 0, // how many items have a payback period
+		hover: '', // the id of the store item under the mouse
+		watching: false,
+	};
+
+	function isMonsterLoaded() {
+		return !!window.CookieMonsterData;
+	}
+
+	// Until the player chooses, the overlay is on unless Cookie Monster is drawing its own store colors.
+	function isOverlayOn() {
+		const choice = settings().storeOverlay;
+		return choice === null ? !isMonsterLoaded() : choice;
+	}
+
+	function ratingFor(pp, bestPP) {
+		if (pp <= bestPP * CLOSE_RATIO) return 'close';
+		return pp <= bestPP * AVERAGE_RATIO ? 'average' : 'poor';
+	}
+
+	// Rates everything in the store from the cached payback results. The best buy is the item auto-buy
+	// would take: the lowest payback period among the items it can buy right now.
+	function computeRatings(now) {
+		const ratings = new Map();
+		overlay.ratings = ratings;
+		overlay.ranked = 0;
+		if (!calc.base || !calc.results.size) return;
+		const report = { filtered: [], infinite: [] };
+		const candidates = rankCandidates(report);
+		overlay.ranked = candidates.length;
+		let best = null;
+		for (const candidate of candidates) {
+			if (!unbuyableReason(candidate, now)) {
+				best = candidate;
+				break;
+			}
+		}
+		const bestPP = best ? best.pp : candidates.length ? candidates[0].pp : 0;
+		candidates.forEach(function (candidate, i) {
+			const held = candidate === best ? '' : unbuyableReason(candidate, now);
+			ratings.set(candidateKey(candidate), {
+				rating: candidate === best ? 'best' : ratingFor(candidate.pp, bestPP),
+				pp: candidate.pp, rank: i + 1, tag: candidate.tag || '', why: held ? `auto-buy is passing over it for now: ${held}` : '',
+			});
+		});
+
+		const s = settings();
+		const clickRate = effectiveClickRate();
+		for (const upgrade of Game.UpgradesInStore) {
+			const key = candidateKey({ kind: 'upgrade', name: upgrade.name, amount: 1 });
+			if (ratings.has(key)) continue;
+			const reason = upgradeFilterReason(upgrade);
+			if (reason) {
+				ratings.set(key, { rating: 'skip', why: SKIP_REASONS[reason] || `it is in the ${reason}` });
+			} else if (upgrade.pool === 'tech') {
+				ratings.set(key, s.buyResearch ?
+					{ rating: 'research', why: 'research is bought as soon as it is affordable, whatever its payback period' + (s.autoBuy ? '' : ' (auto-buy is off)') } :
+					{ rating: 'skip', why: 'it is research, and Buy research is off' });
+			} else {
+				const outcome = calc.results.get(key);
+				if (!outcome) continue; // not worked out yet
+				let why = "it doesn't raise your income, so it never pays for itself";
+				if (outcome.gain < 0) why = 'it lowers your CpS';
+				else if (outcome.clickGain > 0 && clickRate <= 0) why = 'it only raises click income, and the autoclicker is off';
+				ratings.set(key, { rating: 'none', why: why });
+			}
+		}
+		for (const name in Game.Objects) {
+			for (const amount of BUY_AMOUNTS) {
+				const key = candidateKey({ kind: 'building', name: name, amount: amount });
+				if (!ratings.has(key) && calc.results.has(key)) ratings.set(key, { rating: 'none', why: "it doesn't raise your CpS" });
+			}
+		}
+	}
+
+	// The upgrade a store crate stands for: the game numbers the crates "upgrade0", "upgrade1"... in
+	// the order of Game.UpgradesInStore.
+	function crateUpgrade(crate) {
+		const match = /^upgrade(\d+)$/.exec(crate.id || '');
+		return match ? Game.UpgradesInStore[Number(match[1])] || null : null;
+	}
+
+	function setRating(element, rating) {
+		if (!element) return;
+		if (!rating) {
+			if (element.dataset.afkRating !== undefined) delete element.dataset.afkRating;
+		} else if (element.dataset.afkRating !== rating) {
+			element.dataset.afkRating = rating;
+		}
+	}
+
+	// The amount the store's bulk buttons are set to, if it is one the calculator rates.
+	function storeBulk() {
+		return Game.buyMode === 1 && BUY_AMOUNTS.indexOf(Game.buyBulk) !== -1 ? Game.buyBulk : 0;
+	}
+
+	// Writes the ratings onto the store's elements. The ratings are attributes, which the game leaves
+	// alone when it redraws a price or swaps a class.
+	function applyOverlay() {
+		const on = isOverlayOn();
+		for (const id of UPGRADE_BOXES) {
+			const box = document.getElementById(id);
+			if (!box) continue;
+			const crates = box.getElementsByClassName('upgrade');
+			for (let i = 0; i < crates.length; i++) {
+				const upgrade = on ? crateUpgrade(crates[i]) : null;
+				const entry = upgrade ? overlay.ratings.get(candidateKey({ kind: 'upgrade', name: upgrade.name, amount: 1 })) : null;
+				setRating(crates[i], entry ? entry.rating : '');
+			}
+		}
+		const bulk = on ? storeBulk() : 0;
+		for (const building of Game.ObjectsById) {
+			const entry = bulk ? overlay.ratings.get(candidateKey({ kind: 'building', name: building.name, amount: bulk })) : null;
+			setRating(document.getElementById('product' + building.id), entry ? entry.rating : '');
+		}
+	}
+
+	// A payback period or a wait, in the two largest units that matter.
+	function shortTime(seconds) {
+		if (!Number.isFinite(seconds)) return 'never';
+		if (seconds < 1) return 'under a second';
+		if (seconds < 60) return `${Math.round(seconds)}s`;
+		const minutes = Math.floor(seconds / 60);
+		if (minutes < 60) return `${minutes}m ${Math.round(seconds % 60)}s`;
+		const hours = Math.floor(minutes / 60);
+		if (hours < 48) return `${hours}h ${minutes % 60}m`;
+		const days = Math.floor(hours / 24);
+		if (days < 730) return `${days}d ${hours % 24}h`;
+		return `${Beautify(Math.floor(days / 365))} years`;
+	}
+
+	function affordableText(price) {
+		const shortfall = price - Game.cookies;
+		if (shortfall <= 0) return 'now';
+		const cps = calc.base ? calc.base.immediate : 0;
+		return cps > 0 ? `in ${shortTime(shortfall / cps)}` : 'not without income';
+	}
+
+	function tipRow(label, value) {
+		return `<tr><td>${label}</td><td>${value}</td></tr>`;
+	}
+
+	function ratingWords(entry) {
+		return `<span class="afk-mark" data-afk-rating="${entry.rating}"></span> ${RATINGS[entry.rating].label}`;
+	}
+
+	function entryRows(entry) {
+		let rows = '';
+		if (entry.pp !== undefined) {
+			rows += tipRow('Payback period', shortTime(entry.pp) + (entry.tag === 'click' ? ` (click upgrade, at ${effectiveClickRate().toFixed(1)} clicks per second)` : '')) +
+				tipRow('Rank', `${entry.rank} of ${overlay.ranked}`);
+		}
+		if (entry.why) rows += tipRow('Why', escapeHtml(capitalize(entry.why)));
+		return rows;
+	}
+
+	// What AFK Baker adds to the game's tooltip for a store item, or '' if it has nothing to say.
+	function overlayTipHtml(element) {
+		let rows = '';
+		let head = null;
+		const product = /^product(\d+)$/.exec(element.id || '');
+		if (product) {
+			const building = Game.ObjectsById[Number(product[1])];
+			if (!building) return '';
+			const bulk = storeBulk();
+			head = bulk ? overlay.ratings.get(candidateKey({ kind: 'building', name: building.name, amount: bulk })) : null;
+			if (head) rows += entryRows(head) + tipRow('Affordable', affordableText(building.getSumPrice(bulk)));
+			for (const amount of BUY_AMOUNTS) {
+				const entry = overlay.ratings.get(candidateKey({ kind: 'building', name: building.name, amount: amount }));
+				if (!entry) continue;
+				rows += tipRow(`Buy ${amount}`, RATINGS[entry.rating].label + (entry.pp !== undefined ? `, ${shortTime(entry.pp)}` : ''));
+			}
+		} else {
+			const upgrade = crateUpgrade(element);
+			if (!upgrade) return '';
+			head = overlay.ratings.get(candidateKey({ kind: 'upgrade', name: upgrade.name, amount: 1 }));
+			if (head) rows += entryRows(head) + tipRow('Affordable', affordableText(upgrade.getPrice()));
+		}
+		if (!rows) return '';
+		return '<div class="afk-tip-who">AFK Baker</div>' + (head ? `<div class="afk-tip-rating">${ratingWords(head)}</div>` : '') + `<table>${rows}</table>`;
+	}
+
+	// Adds AFK Baker's block to the game's tooltip while a store item is hovered. The game redraws its
+	// tooltip itself; this only appends to what it drew.
+	function extendTooltip() {
+		const tooltip = document.getElementById('tooltip');
+		const hovered = overlay.hover ? document.getElementById(overlay.hover) : null;
+		if (!tooltip || !hovered || !isOverlayOn()) return;
+		if (tooltip.querySelector('.afk-tip')) return;
+		const html = overlayTipHtml(hovered);
+		if (!html) return;
+		const block = document.createElement('div');
+		block.className = 'afk-tip';
+		block.innerHTML = html;
+		tooltip.appendChild(block);
+	}
+
+	function storeItemAt(target) {
+		return target && target.closest ? target.closest('.crate.upgrade, .product') : null;
+	}
+
+	// Follows the store as the game rebuilds it, so a rebuilt store is marked at once and not at the next
+	// half-second refresh.
+	function watchStore() {
+		if (overlay.watching || typeof MutationObserver === 'undefined') return;
+		const store = document.getElementById('store');
+		const tooltip = document.getElementById('tooltip');
+		if (!store || !tooltip) return;
+		overlay.watching = true;
+		const marker = new MutationObserver(applyOverlay);
+		for (const id of UPGRADE_BOXES) {
+			const box = document.getElementById(id);
+			if (box) marker.observe(box, { childList: true });
+		}
+		store.addEventListener('mouseover', function (event) {
+			const item = storeItemAt(event.target);
+			overlay.hover = item ? item.id : '';
+			// The game has usually drawn its tooltip by now; the observer below catches the later redraws.
+			extendTooltip();
+		});
+		store.addEventListener('mouseout', function (event) {
+			if (!storeItemAt(event.relatedTarget)) overlay.hover = '';
+		});
+		new MutationObserver(extendTooltip).observe(tooltip, { childList: true });
+	}
+
+	function refreshOverlay(now) {
+		watchStore();
+		if (isOverlayOn()) computeRatings(now);
+		else overlay.ratings = new Map();
+		applyOverlay();
+	}
+
+	/* =====================================================================
+	   PANEL
+	   AFK Baker's own panel, opened from a tab under the news ticker. It is drawn only when the player
+	   does something, so nothing is ever replaced under a field being edited or a drag in progress.
+	   ===================================================================== */
+
+	// There is no menu hook, so Game.UpdateMenu is wrapped: the Options menu gets one line with a button
+	// that opens the panel, and the panel closes when one of the game's menus opens in its place.
 	function installMenuHook() {
 		const originalUpdateMenu = Game.UpdateMenu;
 		Game.UpdateMenu = function () {
-			// The game rebuilds the Options menu every 5 seconds; don't wipe a field the player is typing in.
-			// The same goes for a drag in progress in the lump priority list.
-			if (Game.onMenu === 'prefs' && (isEditingField() || state.drag) && document.getElementById('afkBakerMenu')) return;
 			const result = originalUpdateMenu.apply(this, arguments);
-			if (Game.onMenu === 'prefs') renderMenuSection();
+			if (Game.onMenu !== '') closePanel();
+			if (Game.onMenu === 'prefs') addOptionsLine();
 			return result;
 		};
 	}
 
-	// A focused text field or dropdown in our section: a number, or the priority list's Add row.
-	function isEditingField() {
-		const el = document.activeElement;
-		return !!(el && (el.tagName === 'INPUT' || el.tagName === 'SELECT') && el.closest('#afkBakerMenu'));
+	function addOptionsLine() {
+		const menu = document.getElementById('menu');
+		if (!menu || document.getElementById('afkBakerOptionsLine')) return;
+		const line = document.createElement('div');
+		line.id = 'afkBakerOptionsLine';
+		line.className = 'block';
+		line.style.cssText = 'padding:0px;margin:8px 4px;';
+		line.innerHTML = '<div class="subsection" style="padding:0px;">' +
+			`<div class="title">AFK Baker <small style="opacity:0.6;">v${VERSION}</small></div>` +
+			'<div class="listing"><label>AFK Baker\'s settings and status are in its own panel.</label>' +
+			'<a class="smallFancyButton option" id="afkBakerOpenFromOptions">Open AFK Baker</a></div></div>';
+		line.querySelector('#afkBakerOpenFromOptions').addEventListener('click', function () {
+			PlaySound('snd/tick.mp3');
+			openPanel();
+		});
+		// The prefs menu ends with an empty spacer div; slot in just above it.
+		if (menu.lastElementChild) menu.insertBefore(line, menu.lastElementChild);
+		else menu.appendChild(line);
 	}
 
 	function escapeHtml(text) {
@@ -2501,7 +2847,7 @@
 	// max-width keeps wide fields (aura dropdowns, the threshold box) inside a narrow Options column.
 	const FIELD_STYLE = 'background:#000;color:#ccc;border:1px solid #ccc;padding:3px 6px;font-size:12px;margin:2px 4px 2px 0px;max-width:calc(100% - 20px);';
 
-	// Layout for the lump priority list. Borders, fonts and buttons come from the game's own classes
+	// Layout for the panel, the lump priority list and the store overlay. Borders, fonts and buttons come from the game's own classes
 	// (smallFramed, smallFancyButton, option, tinyProductIcon). The game runs Electron 11 (Chromium 87),
 	// so nothing newer than that is used.
 	const STYLES = `
@@ -2537,6 +2883,74 @@
 #afkBakerMenu .afk-row.afk-drag-source{opacity:0.3;}
 body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 .afk-ghost{position:fixed;left:0px;top:0px;z-index:100000000;pointer-events:none;display:flex;align-items:center;padding:3px 10px 3px 4px;font-family:'Merriweather',Georgia,serif;font-variant:small-caps;font-weight:bold;font-size:13px;color:#fff;opacity:0.92;}
+#afkOpen{position:absolute;left:50%;bottom:0px;transform:translateX(-50%);z-index:1001;height:16px;line-height:14px;padding:0px 10px;box-sizing:border-box;cursor:pointer;white-space:nowrap;font-family:'Merriweather',Georgia,serif;font-size:11px;color:#bbb;background:#000 url(img/darkNoise.jpg);border:1px solid;border-color:#ece2b6 #875526 #733726 #dfbc9a;border-bottom:none;border-radius:6px 6px 0px 0px;text-shadow:0px 1px 1px #000;}
+#afkOpen:hover,#afkOpen.afk-selected{color:#fff;}
+.afk-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:#5fe36a;box-shadow:0px 0px 4px #5fe36a;}
+.afk-dot-off{background:#555;box-shadow:none;}
+.afk-dot-wait{background:#ffc94a;box-shadow:0px 0px 4px #ffc94a;}
+.afk-dot-warn{background:#ff6b5e;box-shadow:0px 0px 4px #ff6b5e;}
+#afkPanel{position:absolute;left:0px;right:0px;top:0px;bottom:0px;z-index:500;display:flex;flex-direction:column;background:#000 url(img/darkNoise.jpg);box-shadow:0px 0px 24px #000 inset;font-size:12px;color:#ccc;text-align:left;}
+#afkPanelHead{flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:center;padding:8px 8px 6px 16px;background:linear-gradient(to right,rgba(0,0,0,0.5),rgba(0,0,0,0));border-bottom:1px solid rgba(255,255,255,0.18);}
+#afkPanelHead .afk-panel-name{font-family:'Merriweather',Georgia,serif;font-size:22px;color:#fff;text-shadow:0px 1px 4px #000;margin-right:10px;}
+#afkPanelHead .afk-panel-name small{font-size:12px;opacity:0.6;}
+#afkPanelHead .afk-grow{flex:1 1 auto;}
+#afkPanelHead a.option.afk-pause{min-width:74px;text-align:center;}
+#afkPanelHead a.option.afk-is-paused{color:#ffd84a;border-color:#ffd84a;}
+#afkPanelHead a.option.afk-close{min-width:0px;width:auto;padding:4px 8px;}
+#afkPanelTabs{flex:0 0 auto;display:flex;flex-wrap:wrap;padding:6px 8px 0px 12px;border-bottom:1px solid #875526;}
+#afkPanelTabs .afk-tab{padding:5px 9px 6px;margin-right:2px;cursor:pointer;color:#999;border:1px solid transparent;border-bottom:none;border-radius:4px 4px 0px 0px;white-space:nowrap;position:relative;top:1px;}
+#afkPanelTabs .afk-tab:hover{color:#fff;}
+#afkPanelTabs .afk-tab.afk-selected{color:#fff;border-color:#ece2b6 #875526 transparent #dfbc9a;background:#1c1c1c;}
+#afkPanelTabs .afk-tab-addon{font-style:italic;}
+#afkPanelBody{flex:1 1 auto;min-height:0px;overflow-y:auto;overflow-x:hidden;padding:6px 0px 24px;}
+#afkPanel.afk-panel-narrow #afkPanelHead{padding:5px 6px 4px 12px;}
+#afkPanel.afk-panel-narrow #afkPanelHead .afk-panel-name{font-size:16px;}
+#afkPanel.afk-panel-narrow #afkPanelTabs{padding:4px 6px 0px 8px;}
+#afkPanel.afk-panel-narrow #afkPanelTabs .afk-tab{padding:3px 6px 4px;}
+#afkPanel .afk-paused{margin:4px 16px 8px;padding:6px 10px;border:1px solid #ffd84a;color:#ffd84a;border-radius:3px;}
+#afkPanel .afk-dash{display:grid;grid-template-columns:14px minmax(86px,120px) minmax(0,1.4fr) minmax(0,1fr);grid-column-gap:8px;align-items:baseline;padding:5px 16px;border-bottom:1px solid rgba(255,255,255,0.07);cursor:pointer;line-height:1.3;}
+#afkPanel .afk-dash:hover{background:rgba(255,255,255,0.05);}
+#afkPanel .afk-dash .afk-dot{margin-right:0px;}
+#afkPanel .afk-dash-head{font-size:10px;text-transform:uppercase;letter-spacing:0.5px;opacity:0.5;cursor:default;padding-top:2px;padding-bottom:2px;}
+#afkPanel .afk-dash-head:hover{background:none;}
+#afkPanel .afk-dash-name{font-family:'Merriweather',Georgia,serif;font-size:13px;color:#fff;}
+#afkPanel .afk-dash-now{color:#ddd;}
+#afkPanel .afk-dash-wait{color:#aaa;}
+#afkPanel .afk-dash-off .afk-dash-name,#afkPanel .afk-dash-off .afk-dash-now{opacity:0.5;}
+#afkPanel.afk-panel-narrow .afk-dash{grid-template-columns:14px minmax(0,1fr);}
+#afkPanel.afk-panel-narrow .afk-dash-now,#afkPanel.afk-panel-narrow .afk-dash-wait{grid-column:2;}
+#afkPanel.afk-panel-narrow .afk-dash-wait:before{content:'Waiting for: ';font-size:10px;text-transform:uppercase;letter-spacing:0.4px;opacity:0.6;}
+#afkPanel.afk-panel-narrow .afk-dash-nothing,#afkPanel.afk-panel-narrow .afk-dash-head{display:none;}
+#afkPanel .afk-hint{display:inline-block;width:15px;height:15px;line-height:14px;text-align:center;border-radius:50%;border:1px solid #888;color:#aaa;font-size:10px;cursor:help;margin:0px 4px 0px 2px;}
+#afkPanel .afk-hint:hover{color:#fff;border-color:#fff;}
+#afkPanel .afk-legend{display:grid;grid-template-columns:16px minmax(90px,max-content) minmax(0,1fr);grid-gap:5px 8px;align-items:baseline;padding:4px 16px;}
+#afkPanel .afk-legend b{color:#fff;font-weight:normal;opacity:1;}
+#afkPanel.afk-panel-narrow .afk-legend{grid-template-columns:16px minmax(0,1fr);}
+#afkPanel.afk-panel-narrow .afk-legend span:nth-child(3n){grid-column:2;opacity:0.7;}
+#afkPanel .afk-changes{margin:4px 0px 2px;padding:6px 8px;border:1px solid rgba(255,255,255,0.2);border-radius:3px;line-height:1.5;max-height:180px;overflow-y:auto;}
+#afkPanel textarea{resize:vertical;}
+#afkBakerOptionsLine a.option{margin-left:8px;}
+.afk-mark{display:inline-block;width:10px;height:10px;border:1px solid #000;box-shadow:0px 0px 0px 1px rgba(255,255,255,0.6);vertical-align:-1px;}
+.afk-mark[data-afk-rating="best"],.crate.upgrade[data-afk-rating="best"]:after,.product[data-afk-rating="best"] .price:after{background:#ffd84a;box-shadow:0px 0px 0px 1px #fff,0px 0px 6px #ffd84a;}
+.afk-mark[data-afk-rating="close"],.crate.upgrade[data-afk-rating="close"]:after,.product[data-afk-rating="close"] .price:after{background:#56e0d0;}
+.afk-mark[data-afk-rating="average"],.crate.upgrade[data-afk-rating="average"]:after,.product[data-afk-rating="average"] .price:after{background:#8fb8ff;}
+.afk-mark[data-afk-rating="poor"],.crate.upgrade[data-afk-rating="poor"]:after,.product[data-afk-rating="poor"] .price:after{background:#c79bff;}
+.afk-mark[data-afk-rating="none"],.crate.upgrade[data-afk-rating="none"]:after,.product[data-afk-rating="none"] .price:after{background:#8a8a8a;}
+.afk-mark[data-afk-rating="research"],.crate.upgrade[data-afk-rating="research"]:after{background:radial-gradient(circle,#111 0px,#111 2px,#f4efe0 3px);}
+.afk-mark[data-afk-rating="skip"],.crate.upgrade[data-afk-rating="skip"]:after{background:repeating-linear-gradient(135deg,#111 0px,#111 2px,#e9e9e9 2px,#e9e9e9 4px);}
+.crate.upgrade[data-afk-rating]:after{content:'';position:absolute;left:-1px;top:-1px;width:10px;height:10px;border:1px solid #000;box-shadow:0px 0px 0px 1px rgba(255,255,255,0.6);z-index:20;pointer-events:none;}
+.product[data-afk-rating] .price:after{content:'';display:inline-block;width:8px;height:8px;margin-left:6px;border:1px solid #000;box-shadow:0px 0px 0px 1px rgba(255,255,255,0.6);}
+.product[data-afk-rating] .price{text-shadow:-1px 0px 0px #000,1px 0px 0px #000,0px -1px 0px #000,0px 1px 0px #000,0px 0px 4px #000,0px 2px 4px #000;}
+.product[data-afk-rating="best"] .price{color:#ffd84a !important;}
+.product[data-afk-rating="close"] .price{color:#56e0d0 !important;}
+.product[data-afk-rating="average"] .price{color:#8fb8ff !important;}
+.product[data-afk-rating="poor"] .price{color:#c79bff !important;}
+.product[data-afk-rating="none"] .price{color:#d0d0d0 !important;}
+#tooltip .afk-tip{margin:0px 8px 8px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.2);font-size:11px;text-align:left;position:relative;}
+#tooltip .afk-tip-who{font-size:9px;text-transform:uppercase;letter-spacing:0.5px;opacity:0.55;}
+#tooltip .afk-tip-rating{font-size:13px;color:#fff;margin:2px 0px;}
+#tooltip .afk-tip td{padding:1px 10px 1px 0px;vertical-align:top;}
+#tooltip .afk-tip td:first-child{opacity:0.6;white-space:nowrap;}
 `;
 
 	function installStyles() {
@@ -2909,91 +3323,6 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		return lines;
 	}
 
-	function statusHtml() {
-		return statusLines().map(escapeHtml).join('<br>');
-	}
-
-	function menuHtml() {
-		return '<div class="subsection" style="padding:0px;">' +
-			`<div class="title">AFK Baker <small style="opacity:0.6;">v${VERSION}</small></div>` +
-			`<div class="listing" id="afkBakerStatus" style="opacity:0.85;">${statusHtml()}</div>` +
-
-			heading('Clickers') +
-			listing(`<label>Big cookie clicks per second</label> ${numberInput('clickRate')}${note(`0 = off, max ${MAX_CLICK_RATE}; keeps clicking while minimized`)}`) +
-			listing(toggleButton('muteCookieClick', 'Mute big cookie click sound') + note('your clicks and the autoclicker; every other sound stays on')) +
-			listing(toggleButton('clickGolden', 'Golden cookies') + toggleButton('clickWrath', 'Include wrath cookies')) +
-			listing(toggleButton('clickReindeer', 'Reindeer')) +
-			listing(cycleButton('wrinklerMode', 'Wrinklers') + note('shinies are only ever popped by Feed mode, right before ascending')) +
-			listing(toggleButton('clickFortunes', 'Fortune tickers') + cycleButton('fortuneMode', 'Click')) +
-
-			heading('Auto-buy') +
-			listing(toggleButton('autoBuy', 'Auto-buy') + note("buys the upgrade or building (1, 10 or 100 at once) with the lowest payback period, and waits for it rather than buying worse items")) +
-			listing(note('with the autoclicker on, click upgrades such as the mouse upgrades are ranked by the click income they add')) +
-			listing(toggleButton('muteBuySounds', 'Mute auto-buy purchase sounds') + note('only purchases made by AFK Baker; your own purchases still make a sound')) +
-			listing(cycleButton('reserveMode', 'Cookie reserve') + note('Off by default; Lucky = 6,000x unbuffed CpS, Lucky + Frenzy = 42,000x')) +
-			listing(`<label>Auto: no reserve for the first</label> ${numberInput('autoReserveMinutes')}<label>minutes of a run, then Lucky</label>`) +
-			listing(toggleButton('buyResearch', 'Buy research') + note('research upgrades advance the grandmapocalypse')) +
-			listing(toggleButton('elderPledge', 'Elder Pledge') + note('pledging stops wrinklers from spawning; never pledges in Feed mode or while a shiny is on screen')) +
-
-			heading('Sugar lumps') +
-			listing(toggleButton('autoHarvestLumps', 'Auto-harvest sugar lumps') + note('only when ripe, every lump type; paused during Born again')) +
-			listing(toggleButton('autoSpendLumps', 'Auto-spend sugar lumps') + note('only on building levels, in list order; never skips ahead to a later entry')) +
-			listing(`<label>Keep at least</label> ${numberInput('keepLumps')}<label>lumps</label>`) +
-			lumpPriorityHtml() +
-
-			heading('Krumblor the dragon') +
-			listing(note('the dragon, its auras and its drops reset on every ascension, so the mod starts over each run')) +
-			listing(toggleButton('autoTrainDragon', 'Auto-train dragon') + note('buys the crumbly egg, then trains level by level; cookie steps respect the cookie reserve')) +
-			listing(`<label>Train when a step costs less than</label> ${numberInput('dragonTrainMinutes')}<label>minutes of CpS</label>`) +
-			listing(note('for sacrifice steps: the cost of buying any missing buildings plus rebuying everything sacrificed, at unbuffed CpS')) +
-			listing(`<label>Primary aura</label> ${auraSelect('dragonAura1')}`) +
-			listing(`<label>Secondary aura</label> ${auraSelect('dragonAura2')}${note('used once the dragon is fully trained')}`) +
-			listing(note('greyed auras are locked right now and are set once the dragon reaches that level; setting an aura costs one of your highest building; an aura already in either slot is never moved')) +
-			listing(toggleButton('autoPetDragon', 'Auto-pet dragon') + note('opens the dragon panel to pet until all four drops are found, then buys Dragon fang and Dragon teddy bear; needs the heavenly upgrade Pet the dragon')) +
-
-			heading('Stock market') +
-			listing(note('the whole market resets on every ascension (your stock, brokers and office), so the mod rebuilds it each run; nothing happens until the Bank minigame is unlocked')) +
-			listing(toggleButton('autoTrade', 'Auto-trade stocks') + note('uses only what a player can see, the prices; never reads the market\'s hidden state; never takes loans')) +
-			listing(cycleButton('marketStrategy', 'Strategy') + note('guide rules, from KarmicChaos\'s stock market guide: always buy under $5, sell once past the bank ceiling ($97 + $3 per Bank level)')) +
-			listing(`<label>Buy at</label> ${numberInput('marketBuyPercent', 40)}<label>% of resting value or less; sell at</label> ${numberInput('marketSellPercent', 40)}<label>% or more</label>`) +
-			listing(`<label>The market may use up to</label> ${numberInput('marketBankPercent', 40)}<label>% of your bank</label>` + note('counted on the bank above the cookie reserve plus what is already invested')) +
-			listing(toggleButton('marketSellAtLoss', 'Sell at a loss') + note('off: only sells for more than the stock cost, buying fee included; all stock is still sold right before an auto-ascend')) +
-			listing(toggleButton('autoBrokers', 'Hire brokers') + note('each cuts the 20% buying fee by a twentieth; hired when the saving on one full warehouse fill covers its price')) +
-			listing(toggleButton('autoOffice', 'Upgrade office') + `<label>when rebuying the Cursors costs less than</label> ${numberInput('officeMinutes', 50)}<label>minutes of CpS</label>`) +
-			listing(note('an office upgrade sacrifices Cursors and needs a Cursor level; the mod never spends sugar lumps for it; brokers and office only run while auto-trade is on')) +
-
-			heading('Grimoire') +
-			listing(toggleButton('autoCast', 'Auto-cast spell') + cycleButton('grimoireSpell', 'Spell')) +
-			listing(note('casts when the magic meter is full: magic regenerates faster the fuller the meter is, so that gives the most casts; nothing happens until the Wizard tower minigame is unlocked')) +
-			listing(note('Force the Hand of Fate summons a golden cookie. It waits while a golden cookie is on screen or Magic inept is active (both raise the backfire chance), and while golden cookie clicking is off. The wrath cookie from a backfire is left alone')) +
-			listing(note('Conjure Baked Goods gives 30 minutes of CpS, but capped at 15% of your bank, so it is weak when auto-buy keeps the bank low')) +
-			listing(note('uses only what a player can see; never reads the seed or predicts what a spell will do')) +
-
-			heading('Auto-ascend') +
-			listing(toggleButton('autoAscend', 'Auto-ascend') + cycleButton('ascendMode', 'Threshold type')) +
-			listing(`<label>Threshold</label> ${numberInput('ascendThreshold', 190)}<label id="afkThresholdReadable">${thresholdReadable(settings().ascendThreshold)}</label>`) +
-			listing(note('plain digits, or scientific notation such as 1.146e15; ascends only, reincarnating and heavenly upgrades are up to you')) +
-			listing(note('if the threshold is already reached when the mod loads or you change a setting, it warns instead of ascending')) +
-
-			heading('Other') +
-			listing(toggleButton('debug', 'Debug logging') + note('extra console output, including the top auto-buy candidates')) +
-			'</div>';
-	}
-
-	// The data attribute that identifies a text field or dropdown, so it can be refocused after a re-render.
-	const FIELD_KEYS = ['afkNumber', 'afkLumpField', 'afkLumpTarget', 'afkSelect'];
-
-	function focusedFieldSelector() {
-		const el = document.activeElement;
-		if (!el || !el.dataset || !el.closest('#afkBakerMenu')) return '';
-		for (const key of FIELD_KEYS) {
-			if (el.dataset[key] === undefined) continue;
-			const attr = 'data-' + key.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); });
-			return `[${attr}="${el.dataset[key]}"]`;
-		}
-		return '';
-	}
-
 	// Below this width the list's columns don't fit on one line, so each row takes two.
 	const NARROW_LIST_PX = 390;
 	let listWidthObserver = null;
@@ -3013,59 +3342,647 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		listWidthObserver.observe(list);
 	}
 
-	function renderMenuSection() {
-		if (Game.onMenu !== 'prefs') return;
-		// Replacing the section mid-drag would drop the drag; it's redrawn when the drag ends.
-		if (state.drag) {
-			state.renderPending = true;
+	/* ----- The panel: its tabs and their settings ----- */
+
+	// AFK Baker's own tabs, in order. Tabs registered by add-ons come after them.
+	const TABS = [
+		['dashboard', 'Dashboard'], ['clickers', 'Clickers'], ['autobuy', 'Auto-buy'], ['lumps', 'Sugar lumps'], ['dragon', 'Dragon'],
+		['market', 'Stock Market'], ['grimoire', 'Grimoire'], ['ascend', 'Auto-ascend'], ['other', 'Other'],
+	];
+
+	// A "?" that shows an explanation in the game's own tooltip when hovered.
+	function hint(text) {
+		const tip = `<div style="padding:8px;width:300px;font-size:11px;line-height:1.35;">${escapeHtml(text)}</div>`;
+		return `<span class="afk-hint" ${Game.getTooltip(tip, 'this')}>?</span>`;
+	}
+
+	function actionButton(action, label, extraClass) {
+		return `<a class="smallFancyButton option${extraClass ? ' ' + extraClass : ''}" data-afk-action="${action}">${label}</a>`;
+	}
+
+	function clickersTabHtml() {
+		const s = settings();
+		return listing(`<label>Big cookie clicks per second</label> ${numberInput('clickRate')}` +
+				hint(`0 turns the autoclicker off. The most the game accepts is ${MAX_CLICK_RATE}. It keeps clicking while the game is minimized.`)) +
+			listing(toggleButton('muteCookieClick', 'Mute big cookie click sound') +
+				hint('Silences the big cookie click, for your clicks and the autoclicker. Every other sound stays on.')) +
+			listing(toggleButton('clickGolden', 'Golden cookies') + (s.clickGolden ? toggleButton('clickWrath', 'Include wrath cookies') : '')) +
+			listing(toggleButton('clickReindeer', 'Reindeer')) +
+			listing(cycleButton('wrinklerMode', 'Wrinklers') +
+				hint('Feed: lets wrinklers feed and pops them right before an auto-ascend. Pop instantly: pops each one as it appears. Off: leaves them alone. Shiny wrinklers are only ever popped by Feed mode, right before ascending.')) +
+			listing(toggleButton('clickFortunes', 'Fortune tickers') + (s.clickFortunes ? cycleButton('fortuneMode', 'Click') : ''));
+	}
+
+	function legendHtml() {
+		const rows = RATING_ORDER.map(function (rating) {
+			return `<span class="afk-mark" data-afk-rating="${rating}"></span><b>${RATINGS[rating].label}</b><span>${RATINGS[rating].legend}</span>`;
+		});
+		return `<div class="afk-legend">${rows.join('')}</div>`;
+	}
+
+	function autobuyTabHtml() {
+		const s = settings();
+		let html = listing(toggleButton('autoBuy', 'Auto-buy') +
+			hint('Buys the upgrade or building (1, 10 or 100 at once) with the lowest payback period, and saves up for it rather than buying something worse. With the autoclicker on, click upgrades such as the mouse upgrades are ranked by the click income they add.'));
+		if (s.autoBuy) {
+			html += listing(toggleButton('buyResearch', 'Buy research') + hint('Research upgrades advance the grandmapocalypse.')) +
+				listing(toggleButton('elderPledge', 'Elder Pledge') +
+					hint('Pledging stops wrinklers from spawning. Never pledges in Feed mode or while a shiny wrinkler is on screen.'));
+		}
+		html += listing(cycleButton('reserveMode', 'Cookie reserve') +
+			hint('How many cookies always stay banked. Auto-buy, dragon training and the stock market all respect it. Off by default. Lucky keeps 6,000x unbuffed CpS, Lucky + Frenzy 42,000x: the bank sizes a full Lucky payout needs. Auto keeps nothing early in a run, then switches to Lucky.'));
+		if (s.reserveMode === 'auto') {
+			html += listing(`<label>Auto: no reserve for the first</label> ${numberInput('autoReserveMinutes')}<label>minutes of a run, then Lucky</label>`);
+		}
+		html += listing(toggleButton('muteBuySounds', 'Mute auto-buy purchase sounds') +
+			hint("Purchases, level-ups, dragon training and petting, stock trades and spell casts made by AFK Baker are silent. Your own purchases still make a sound."));
+
+		const monster = isMonsterLoaded();
+		html += heading('Store overlay') +
+			listing(`<a class="smallFancyButton prefButton option${isOverlayOn() ? '' : ' off'}" data-afk-action="overlay">Show ratings in the store ${isOverlayOn() ? 'ON' : 'OFF'}</a>` +
+				hint("Marks each upgrade's corner and colors each building's price by how its payback period compares with the best one, and adds the numbers to the game's tooltips. It reads the numbers auto-buy works out and runs no calculations of its own." +
+					(monster ? ' Cookie Monster is loaded and draws its own colors in the store, so this starts switched off to avoid two sets of squares. Turning it on here is remembered.' : ''))) +
+			(monster && s.storeOverlay === null ? listing('<label>Off because Cookie Monster is loaded and draws its own colors in the store. You can turn this on anyway.</label>') : '') +
+			legendHtml() +
+			listing('<label>Every rating is also written out in the tooltip, so it doesn\'t depend on telling the colors apart. A building\'s price shows the rating for the amount the store is set to buy (1, 10 or 100).</label>');
+		return html;
+	}
+
+	function lumpsTabHtml() {
+		const s = settings();
+		let html = listing(toggleButton('autoHarvestLumps', 'Auto-harvest sugar lumps') +
+				hint('Harvests only when the lump is ripe, whatever its type. Paused during Born again.')) +
+			listing(toggleButton('autoSpendLumps', 'Auto-spend sugar lumps') +
+				hint('Spends lumps only on building levels, in list order. It never skips ahead to a later entry.'));
+		// The list stays visible while auto-spend is off: it is what to set up before turning it on.
+		if (!s.autoSpendLumps) html += listing('<label>Auto-spend is off: no lumps are spent until you turn it on.</label>');
+		return html + listing(`<label>Keep at least</label> ${numberInput('keepLumps')}<label>lumps</label>`) + lumpPriorityHtml();
+	}
+
+	function dragonTabHtml() {
+		const s = settings();
+		let html = listing('<label>The dragon, its auras and its drops reset on every ascension, so AFK Baker starts over each run.</label>') +
+			listing(toggleButton('autoTrainDragon', 'Auto-train dragon') +
+				hint('Buys the crumbly egg, then trains level by level. Steps paid in cookies respect the cookie reserve.'));
+		if (s.autoTrainDragon) {
+			html += listing(`<label>Train when a step costs less than</label> ${numberInput('dragonTrainMinutes')}<label>minutes of CpS</label>` +
+				hint('For sacrifice steps the cost is what it takes to buy any missing buildings plus rebuy everything sacrificed, at unbuffed CpS.'));
+		}
+		return html +
+			listing(`<label>Primary aura</label> ${auraSelect('dragonAura1')}`) +
+			listing(`<label>Secondary aura</label> ${auraSelect('dragonAura2')}` +
+				hint('The second slot is used once the dragon is fully trained. Greyed auras are locked right now and are set when the dragon reaches that level. Setting an aura costs one of your highest building. An aura already in either slot is never moved.')) +
+			listing(toggleButton('autoPetDragon', 'Auto-pet dragon') +
+				hint('Opens the dragon panel to pet until all four drops are found, then buys Dragon fang and Dragon teddy bear. Needs the heavenly upgrade Pet the dragon.'));
+	}
+
+	function marketTabHtml() {
+		const s = settings();
+		let html = listing('<label>The whole market resets on every ascension. Nothing happens until the Bank minigame is unlocked.</label>') +
+			listing(toggleButton('autoTrade', 'Auto-trade stocks') +
+				hint("Uses only what a player can see: the prices. It never reads the market's hidden state and never takes loans."));
+		if (!s.autoTrade) return html;
+		html += listing(cycleButton('marketStrategy', 'Strategy') +
+				hint("The guide rules come from KarmicChaos's stock market guide: always buy under $5, and sell once past the bank ceiling ($97 + $3 per Bank level).")) +
+			listing(`<label>Buy at</label> ${numberInput('marketBuyPercent', 40)}<label>% of resting value or less; sell at</label> ${numberInput('marketSellPercent', 40)}<label>% or more</label>`) +
+			listing(`<label>The market may use up to</label> ${numberInput('marketBankPercent', 40)}<label>% of your bank</label>` +
+				hint('Counted on the bank above the cookie reserve, plus what is already invested.')) +
+			listing(toggleButton('marketSellAtLoss', 'Sell at a loss') +
+				hint('Off: only sells for more than the stock cost, buying fee included. All stock is still sold right before an auto-ascend.')) +
+			listing(toggleButton('autoBrokers', 'Hire brokers') +
+				hint('Each broker cuts the 20% buying fee by a twentieth. One is hired when the saving on one full warehouse fill covers its price.')) +
+			listing(toggleButton('autoOffice', 'Upgrade office') +
+				(s.autoOffice ? `<label>when rebuying the Cursors costs less than</label> ${numberInput('officeMinutes', 50)}<label>minutes of CpS</label>` : '') +
+				hint('An office upgrade sacrifices Cursors and needs a Cursor level. AFK Baker never spends sugar lumps for it.'));
+		return html;
+	}
+
+	function grimoireTabHtml() {
+		const s = settings();
+		let html = listing(toggleButton('autoCast', 'Auto-cast spell') + (s.autoCast ? cycleButton('grimoireSpell', 'Spell') : '') +
+			hint('Casts when the magic meter is full: magic regenerates faster the fuller the meter is, so that gives the most casts. Nothing happens until the Wizard tower minigame is unlocked. Uses only what a player can see; it never reads the seed or predicts what a spell will do.'));
+		if (!s.autoCast) return html;
+		html += listing(s.grimoireSpell === 'hand of fate' ?
+			'<label>Force the Hand of Fate summons a golden cookie.</label>' +
+				hint('It waits while a golden cookie is on screen or Magic inept is active (both raise the backfire chance), and while golden cookie clicking is off. The wrath cookie from a backfire is left alone.') :
+			'<label>Conjure Baked Goods gives 30 minutes of CpS.</label>' +
+				hint('The payout is capped at 15% of your bank, so it is weak when auto-buy keeps the bank low.'));
+		return html;
+	}
+
+	function ascendTabHtml() {
+		const s = settings();
+		// The threshold stays visible while auto-ascend is off: it is what to check before turning it on.
+		return listing(toggleButton('autoAscend', 'Auto-ascend') +
+				hint('Ascends only. Reincarnating and heavenly upgrades are up to you. If the threshold is already reached when the mod loads or you change a setting, it warns instead of ascending.')) +
+			listing(cycleButton('ascendMode', 'Threshold type')) +
+			listing(`<label>Threshold</label> ${numberInput('ascendThreshold', 190)}<label id="afkThresholdReadable">${thresholdReadable(s.ascendThreshold)}</label>` +
+				hint('Plain digits, or scientific notation such as 1.146e15.'));
+	}
+
+	function otherTabHtml() {
+		const draft = state.importDraft;
+		let importHtml = listing(`<textarea data-afk-import rows="3" spellcheck="false" placeholder="Paste a settings text here" style="width:calc(100% - 20px);font-family:Consolas,monospace;font-size:11px;${FIELD_STYLE}">${escapeHtml(draft.text)}</textarea>`) +
+			listing(actionButton('import-check', 'Check import') +
+				hint('Nothing is changed until you confirm. The text is checked the same way a saved game\'s settings are, so a bad or edited text can\'t break anything. Auto-ascend is always imported switched off, and what the stock market paid for its current stock stays as it is.'));
+		if (draft.error) importHtml += listing(`<label style="color:#f66;">${escapeHtml(draft.error)}</label>`);
+		if (draft.preview) {
+			const changes = draft.preview.changes;
+			importHtml += listing(changes.length ?
+				`<label>Importing would change ${changes.length} setting${changes.length === 1 ? '' : 's'}:</label>` +
+					`<div class="afk-changes">${changes.map(function (change) { return `<div>${escapeHtml(change)}</div>`; }).join('')}</div>` :
+				'<label>These are the settings you already have. Nothing would change.</label>') +
+				listing((changes.length ? actionButton('import-apply', 'Apply these changes') : '') + actionButton('import-cancel', 'Cancel'));
+		}
+		return listing(toggleButton('debug', 'Debug logging') +
+				hint('Extra console output, including the top auto-buy candidates and, if Cookie Monster is installed, a comparison of payback periods.')) +
+			heading('Settings export') +
+			listing(`<textarea readonly id="afkExportText" rows="3" style="width:calc(100% - 20px);font-family:Consolas,monospace;font-size:11px;${FIELD_STYLE}">${escapeHtml(exportSettings())}</textarea>`) +
+			listing(actionButton('export-copy', state.exportCopied ? 'Copied' : 'Copy') + hint('The text holds every AFK Baker setting, including the sugar lump list.')) +
+			heading('Settings import') + importHtml +
+			heading('About') +
+			listing(`<label>AFK Baker ${VERSION}. Extension hooks version ${ext.apiVersion}.</label>`);
+	}
+
+	const TAB_HTML = {
+		clickers: clickersTabHtml, autobuy: autobuyTabHtml, lumps: lumpsTabHtml, dragon: dragonTabHtml,
+		market: marketTabHtml, grimoire: grimoireTabHtml, ascend: ascendTabHtml, other: otherTabHtml,
+	};
+
+	/* ----- The dashboard: one row per feature ----- */
+
+	// A status line without its "Label: " prefix.
+	function afterLabel(line) {
+		return line.replace(/^[^:]{1,24}: /, '');
+	}
+
+	// Splits "Next: ... (waiting for ...)" into what is being done and what it is waiting for.
+	function splitWait(text) {
+		const match = /^(.*?)\s*\(((?:waiting|rebuy|buying|short|[0-9]).*)\)\.?(.*)$/.exec(text);
+		if (!match) return { now: text, wait: '' };
+		return { now: (match[1] + match[3]).trim(), wait: match[2].replace(/^waiting for /, '') };
+	}
+
+	function clickerRow() {
+		const s = settings();
+		const on = [];
+		if (s.clickGolden) on.push(s.clickWrath ? 'golden and wrath cookies' : 'golden cookies');
+		if (s.clickReindeer) on.push('reindeer');
+		if (s.clickFortunes) on.push('fortunes');
+		const measured = state.measuredClickRate;
+		let now = s.clickRate > 0 ?
+			`Big cookie ${s.clickRate}/s` + (measured !== null ? ` (${measured.toFixed(1)} landing)` : '') + '.' :
+			'Big cookie autoclicker off.';
+		now += on.length ? ` Clicking ${on.join(', ')}.` : '';
+		return { tab: 'clickers', name: 'Clickers', dot: s.clickRate > 0 || on.length ? 'on' : 'off', now: now, wait: '' };
+	}
+
+	function wrinklerRow() {
+		const s = settings();
+		let wait = '';
+		if (s.wrinklerMode === 'feed') wait = s.autoAscend ? 'the auto-ascend, to pop them first' : '';
+		return { tab: 'clickers', name: 'Wrinklers', dot: s.wrinklerMode === 'off' ? 'off' : 'on',
+			now: (s.wrinklerMode === 'off' ? 'Left alone. ' : '') + capitalize(afterLabel(wrinklerLine())) + '.', wait: wait };
+	}
+
+	function autoBuyRow() {
+		const s = settings();
+		const status = state.buyStatus;
+		let dot = 'on';
+		let now = status;
+		let wait = '';
+		if (!s.autoBuy) dot = 'off';
+		else if (/^Paused/.test(status)) dot = 'warn';
+		else if (/^Waiting on the item: /.test(status)) {
+			dot = 'wait';
+			const parts = /^Waiting on the item: saving for (.*), need (.*) more\.$/.exec(status);
+			if (parts) {
+				now = `Saving for ${parts[1]}.`;
+				wait = `${parts[2]} more cookies`;
+			}
+		} else if (/^Waiting on reserve: /.test(status)) {
+			dot = 'wait';
+			const parts = /^Waiting on reserve: (.*), need (.*) more\.$/.exec(status);
+			if (parts) {
+				now = capitalize(parts[1]) + '.';
+				wait = `${parts[2]} more cookies, to keep the reserve`;
+			}
+		} else if (/^(Working|Waiting)/.test(status)) dot = 'wait';
+		predictionLines().forEach(function (line) { now += ' ' + line + '.'; });
+		return { tab: 'autobuy', name: 'Auto-buy', dot: dot, now: now, wait: wait };
+	}
+
+	function reserveRow() {
+		const mode = settings().reserveMode;
+		return { tab: 'autobuy', name: 'Cookie reserve', dot: mode === 'off' ? 'off' : 'on',
+			now: mode === 'off' ? 'Off: nothing is kept banked.' : `${Beautify(reserveAmount())} kept banked (${reserveLabel()}).`, wait: '' };
+	}
+
+	function lumpRow() {
+		const s = settings();
+		const lines = lumpLines();
+		if (lines.length < 2) return { tab: 'lumps', name: 'Sugar lumps', dot: 'off', now: capitalize(afterLabel(lines[0])) + '.', wait: '' };
+		const waits = [];
+		const next = nextLumpSpend();
+		if (s.autoSpendLumps && next) {
+			const need = next.cost + s.keepLumps - Game.lumps;
+			if (need > 0) waits.push(`${Beautify(need)} more ${need === 1 ? 'lump' : 'lumps'}`);
+		}
+		if (!isBornAgain() && !isLumpRipe()) waits.push(`the current lump, ripe in ${formatDuration(Game.lumpRipeAge - lumpAge())}`);
+		const anyOn = s.autoHarvestLumps || s.autoSpendLumps;
+		return { tab: 'lumps', name: 'Sugar lumps', dot: !anyOn ? 'off' : waits.length ? 'wait' : 'on',
+			now: `${lumpCount(Game.lumps)} owned. ${capitalize(afterLabel(lines[1]))}.` + (s.autoHarvestLumps ? '' : ' Auto-harvest off.') +
+				(state.lastHarvest ? ` Last harvest: ${state.lastHarvest}.` : ''),
+			wait: anyOn ? waits.join('; ') : '' };
+	}
+
+	function dragonRows() {
+		const s = settings();
+		const lines = dragonLines();
+		const anyOn = s.autoTrainDragon || s.autoPetDragon || !!s.dragonAura1 || !!s.dragonAura2;
+		const parts = splitWait(afterLabel(lines[0]));
+		const rows = [{ tab: 'dragon', name: 'Dragon', dot: !anyOn ? 'off' : s.autoTrainDragon && parts.wait && !/ready$/.test(parts.wait) ? 'wait' : 'on',
+			now: capitalize(parts.now), wait: s.autoTrainDragon ? parts.wait : '' }];
+		if (lines[1]) {
+			const pet = afterLabel(lines[1]);
+			const petWait = /waiting for (the next quarter-hour.*)$/.exec(pet);
+			rows.push({ tab: 'dragon', name: 'Dragon petting', dot: petWait ? 'wait' : 'on',
+				now: capitalize(petWait ? pet.slice(0, petWait.index).replace(/, $/, '') : pet) + '.', wait: petWait ? petWait[1] : '' });
+		}
+		return rows;
+	}
+
+	function marketRows() {
+		const s = settings();
+		const lines = marketLines();
+		if (!lines.length) return [{ tab: 'market', name: 'Stock Market', dot: 'off', now: 'Auto-trade off.', wait: '' }];
+		const M = market();
+		let wait = '';
+		if (s.autoTrade && M) {
+			if (state.ascendPending) wait = '';
+			else if (holdingsValue(M).shares) wait = `a held stock at ${s.marketSellPercent}% of its resting value or more, to sell`;
+			else wait = `a stock at ${s.marketBuyPercent}% of its resting value or less, to buy`;
+		}
+		const rows = [{ tab: 'market', name: 'Stock Market', dot: !s.autoTrade ? 'off' : M ? 'on' : 'wait',
+			now: capitalize(afterLabel(lines[0])), wait: wait }];
+		if (lines[1]) rows.push({ tab: 'market', name: 'Market staff', dot: 'on', now: capitalize(afterLabel(lines[1])), wait: '' });
+		return rows;
+	}
+
+	function grimoireRow() {
+		const s = settings();
+		const lines = grimoireLines();
+		if (!lines.length) return { tab: 'grimoire', name: 'Grimoire', dot: 'off', now: 'Auto-cast off.', wait: '' };
+		const M = grimoire();
+		let wait = '';
+		let dot = s.autoCast ? 'on' : 'off';
+		if (s.autoCast && M) {
+			const choice = spellChoice(M);
+			const hold = choice.spell ? castHoldReason(M, choice.spell) : 'an add-on to allow the cast';
+			if (M.magic < M.magicM) wait = `a full magic meter (${formatDuration(secondsToFullMagic(M) * 1000)})`;
+			else if (hold) wait = hold;
+			if (wait) dot = 'wait';
+		} else if (s.autoCast) {
+			dot = 'wait';
+		}
+		return { tab: 'grimoire', name: 'Grimoire', dot: dot, now: capitalize(afterLabel(lines[0])), wait: wait };
+	}
+
+	function ascendRow() {
+		const s = settings();
+		const progress = prestigeProgress();
+		const value = ascendProgressValue(progress);
+		let now = `Prestige ${Beautify(value)} / ${Beautify(s.ascendThreshold)} ` + (s.ascendMode === 'total' ? 'in total' : 'gained this run');
+		if (s.wrinklerMode === 'feed') now += ', wrinkler payout included';
+		now += '.';
+		if (!s.autoAscend) return { tab: 'ascend', name: 'Auto-ascend', dot: 'off', now: 'Off. ' + now, wait: '' };
+		if (state.ascendWarning) {
+			return { tab: 'ascend', name: 'Auto-ascend', dot: 'warn', now: now + ' The threshold was already reached, so it has not ascended.',
+				wait: 'you to turn auto-ascend off and on to confirm' };
+		}
+		const left = s.ascendThreshold - value;
+		return { tab: 'ascend', name: 'Auto-ascend', dot: left > 0 ? 'wait' : 'on', now: now, wait: left > 0 ? `${Beautify(left)} more prestige` : '' };
+	}
+
+	// What an add-on's status() returned, as a dashboard row. A string is taken as what it is doing now.
+	function addOnRow(tab) {
+		let status = null;
+		try {
+			status = tab.status ? tab.status() : null;
+		} catch (e) {
+			status = { now: `Its status could not be read (${String(e && e.message || e)}).`, state: 'warn' };
+		}
+		if (!status) return null;
+		if (typeof status === 'string') status = { now: status };
+		const dot = ['on', 'off', 'wait', 'warn'].indexOf(status.state) !== -1 ? status.state : 'on';
+		return { tab: tab.id, name: tab.title, addOn: true, dot: dot, now: String(status.now || ''), wait: String(status.wait || '') };
+	}
+
+	function dashboardRows() {
+		let rows = [clickerRow(), wrinklerRow(), autoBuyRow(), reserveRow(), lumpRow()]
+			.concat(dragonRows(), marketRows(), [grimoireRow(), ascendRow()]);
+		ext.tabs.forEach(function (tab) {
+			const row = addOnRow(tab);
+			if (row) rows.push(row);
+		});
+		if (state.lastError) rows.push({ tab: 'other', name: 'Last error', dot: 'warn', now: state.lastError, wait: '' });
+		if (state.paused) rows = rows.map(function (row) { return Object.assign({}, row, { dot: row.dot === 'off' ? 'off' : 'wait' }); });
+		return rows;
+	}
+
+	function dashboardRowHtml(row) {
+		return `<div class="afk-dash${row.dot === 'off' ? ' afk-dash-off' : ''}" data-afk-go="${escapeHtml(row.tab)}">` +
+			`<span class="afk-dot afk-dot-${row.dot}"></span>` +
+			`<span class="afk-dash-name">${row.addOn ? '<i>' : ''}${escapeHtml(row.name)}${row.addOn ? '</i>' : ''}</span>` +
+			`<span class="afk-dash-now">${escapeHtml(row.now)}</span>` +
+			(row.wait ? `<span class="afk-dash-wait">${escapeHtml(row.wait)}</span>` : '<span class="afk-dash-wait afk-dash-nothing">&ndash;</span>') +
+			'</div>';
+	}
+
+	// The live part of the open tab: every row on the Dashboard, the tab's own rows on a settings tab.
+	function liveHtml() {
+		const tab = state.panelTab;
+		const rows = dashboardRows().filter(function (row) { return tab === 'dashboard' || row.tab === tab; });
+		const paused = state.paused ?
+			'<div class="afk-paused">Paused. Nothing is clicked, bought, traded or cast until you press Resume. Your settings are unchanged.</div>' : '';
+		const head = tab === 'dashboard' ?
+			'<div class="afk-dash afk-dash-head"><span></span><span>Feature</span><span>Doing now</span><span>Waiting for</span></div>' : '';
+		return paused + head + rows.map(dashboardRowHtml).join('');
+	}
+
+	/* ----- Settings export and import ----- */
+
+	function exportSettings() {
+		return EXPORT_PREFIX + btoa(unescape(encodeURIComponent(mod.save())));
+	}
+
+	// The settings in an exported text, checked like a saved game's, or null if the text isn't one.
+	function importedSettings(text) {
+		const cleaned = String(text).replace(/\s+/g, '');
+		if (cleaned.indexOf(EXPORT_PREFIX) !== 0) return null;
+		let parsed;
+		try {
+			parsed = JSON.parse(decodeURIComponent(escape(atob(cleaned.slice(EXPORT_PREFIX.length)))));
+		} catch (e) {
+			return null;
+		}
+		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+		const imported = sanitizeSettings(parsed);
+		// An imported text must never be able to trigger an ascension.
+		imported.autoAscend = false;
+		// What the market paid for the stock it holds belongs to this game, not to the settings.
+		imported.marketBasis = settings().marketBasis;
+		return imported;
+	}
+
+	function settingText(key, value) {
+		if (typeof value === 'boolean') return value ? 'ON' : 'OFF';
+		if (value === null) return 'automatic';
+		if (hasKey(CYCLE_OPTIONS, key)) return CYCLE_OPTIONS[key][value];
+		if (key === 'lumpPriority') return value.length ? value.map(function (entry) { return `${entry.building} to ${entry.level}`; }).join(', ') : 'empty';
+		if (value === '') return 'none';
+		return typeof value === 'number' ? Beautify(value) : String(value);
+	}
+
+	// One line per setting an import would change: "Label: old → new".
+	function importChanges(imported) {
+		const current = settings();
+		const changes = [];
+		for (const key in SETTING_LABELS) {
+			if (JSON.stringify(current[key]) === JSON.stringify(imported[key])) continue;
+			changes.push(`${SETTING_LABELS[key]}: ${settingText(key, current[key])} → ${settingText(key, imported[key])}`);
+		}
+		return changes;
+	}
+
+	function checkImport() {
+		const draft = state.importDraft;
+		draft.preview = null;
+		draft.error = '';
+		if (!draft.text.trim()) {
+			draft.error = 'Paste a settings text first.';
 			return;
 		}
-		const menu = document.getElementById('menu');
-		if (!menu) return;
-		const refocus = focusedFieldSelector();
-
-		const section = document.createElement('div');
-		section.id = 'afkBakerMenu';
-		section.className = 'block';
-		section.style.cssText = 'padding:0px;margin:8px 4px;';
-		section.innerHTML = menuHtml();
-		section.addEventListener('click', onMenuClick);
-		section.addEventListener('change', onMenuChange);
-		section.addEventListener('input', onMenuInput);
-		section.addEventListener('keydown', onMenuKeyDown);
-		section.addEventListener('pointerdown', onDragPointerDown);
-
-		const existing = document.getElementById('afkBakerMenu');
-		if (existing) existing.replaceWith(section);
-		// The prefs menu ends with an empty spacer div; slot in just above it.
-		else if (menu.lastElementChild) menu.insertBefore(section, menu.lastElementChild);
-		else menu.appendChild(section);
-
-		watchLumpListWidth(section.querySelector('#afkLumpList'));
-
-		const field = refocus && section.querySelector(refocus);
-		if (field) {
-			field.focus();
-			if (field.tagName === 'INPUT') field.setSelectionRange(field.value.length, field.value.length);
+		const imported = importedSettings(draft.text);
+		if (!imported) {
+			draft.error = 'That is not an AFK Baker settings text.';
+			return;
 		}
+		draft.preview = { settings: imported, changes: importChanges(imported) };
+	}
+
+	function applyImport() {
+		const draft = state.importDraft;
+		if (!draft.preview) return;
+		mod.settings = draft.preview.settings;
+		state.importDraft = { text: '', preview: null, error: '' };
+		state.ascendWarning = false;
+		recheckAscendWarning();
+		applyOverlay();
+	}
+
+	function copyExport() {
+		const text = exportSettings();
+		const field = document.getElementById('afkExportText');
+		if (field) field.select();
+		try {
+			if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text);
+			else document.execCommand('copy');
+		} catch (e) {
+			// The text stays selected, so Ctrl+C still copies it.
+		}
+		state.exportCopied = true;
+	}
+
+	/* ----- The panel itself ----- */
+
+	function panelTabs() {
+		return TABS.map(function (tab) { return { id: tab[0], title: tab[1], addOn: null }; })
+			.concat(ext.tabs.map(function (tab) { return { id: tab.id, title: tab.title, addOn: tab }; }));
+	}
+
+	// The panel lies over the game's center area (the building rows) without being inside it: that area
+	// scrolls, and the panel must not scroll away with it.
+	function placePanel() {
+		const panel = document.getElementById('afkPanel');
+		const center = document.getElementById('centerArea');
+		if (!panel || !center) return;
+		panel.style.top = center.offsetTop + 'px';
+		panel.style.left = center.offsetLeft + 'px';
+	}
+
+	// Built once. The panel covers the middle of the screen, where the game shows its own menus, and
+	// leaves the cookie and the store clickable. Its opening tab hangs in the strip under the news ticker.
+	function ensurePanel() {
+		if (document.getElementById('afkPanel')) return true;
+		const comments = document.getElementById('comments');
+		const center = document.getElementById('centerArea');
+		if (!comments || !center || !center.parentNode) return false;
+
+		const open = document.createElement('div');
+		open.id = 'afkOpen';
+		open.innerHTML = '<span class="afk-dot afk-dot-on" id="afkOpenDot"></span>AFK Baker';
+		open.addEventListener('click', function () {
+			PlaySound('snd/tick.mp3');
+			if (state.panelOpen) closePanel();
+			else openPanel();
+		});
+		comments.appendChild(open);
+
+		const panel = document.createElement('div');
+		panel.id = 'afkPanel';
+		panel.style.display = 'none';
+		panel.innerHTML = '<div id="afkPanelHead"></div><div id="afkPanelTabs"></div>' +
+			'<div id="afkPanelBody"><div id="afkPanelLive"></div><div id="afkBakerMenu"></div></div>';
+		panel.addEventListener('click', onMenuClick);
+		panel.addEventListener('change', onMenuChange);
+		panel.addEventListener('input', onMenuInput);
+		panel.addEventListener('keydown', onMenuKeyDown);
+		panel.addEventListener('pointerdown', onDragPointerDown);
+		center.parentNode.appendChild(panel);
+		if (typeof ResizeObserver !== 'undefined') {
+			new ResizeObserver(function (entries) {
+				for (const entry of entries) panel.classList.toggle('afk-panel-narrow', entry.contentRect.width < NARROW_PANEL_PX);
+			}).observe(panel);
+		}
+		return true;
+	}
+
+	function openPanel(tab) {
+		if (!ensurePanel()) return;
+		// The game's menus use the same space; close whichever is open.
+		if (Game.onMenu !== '') Game.ShowMenu(Game.onMenu);
+		if (tab) state.panelTab = tab;
+		state.panelOpen = true;
+		placePanel();
+		document.getElementById('afkPanel').style.display = '';
+		document.getElementById('afkOpen').classList.add('afk-selected');
+		renderMenuSection();
+	}
+
+	function closePanel() {
+		if (!state.panelOpen) return;
+		state.panelOpen = false;
+		const panel = document.getElementById('afkPanel');
+		if (panel) panel.style.display = 'none';
+		const open = document.getElementById('afkOpen');
+		if (open) open.classList.remove('afk-selected');
+		Game.tooltip.shouldHide = 1;
+	}
+
+	function setPaused(paused) {
+		state.paused = !!paused;
+		// Clicks owed from before the pause are not made up afterwards.
+		state.owedClicks = 0;
+		state.lastClickTime = 0;
+		state.clickWindowStart = 0;
+	}
+
+	function renderPanelHead() {
+		const head = document.getElementById('afkPanelHead');
+		if (!head) return;
+		head.innerHTML = `<span class="afk-panel-name">AFK Baker <small>v${VERSION}</small></span>` +
+			'<span class="afk-grow"></span>' +
+			`<a class="smallFancyButton option afk-pause${state.paused ? ' afk-is-paused' : ''}" data-afk-action="pause" ` +
+			Game.getTooltip('<div style="padding:8px;width:300px;font-size:11px;line-height:1.35;">Stops everything AFK Baker does (clicking, buying, lumps, dragon, trading, casting, ascending) without changing any setting. Resume picks up where it left off. The store ratings keep showing. A pause is not remembered when the game restarts.</div>', 'this') +
+			`>${state.paused ? 'Resume' : 'Pause all'}</a>` +
+			'<a class="smallFancyButton option afk-close" data-afk-action="close">x</a>';
+	}
+
+	// Draws the open tab. Only called when the player does something (opens the panel, switches tab,
+	// changes a setting), so a field being typed in is never replaced under the player. What changes on
+	// its own, the status rows and the lump list's numbers, is updated in place by refreshStatusLine.
+	function renderMenuSection() {
+		if (!state.panelOpen || !ensurePanel()) return;
+		const tabs = panelTabs();
+		if (!tabs.some(function (tab) { return tab.id === state.panelTab; })) state.panelTab = 'dashboard';
+		renderPanelHead();
+		document.getElementById('afkPanelTabs').innerHTML = tabs.map(function (tab) {
+			return `<div class="afk-tab${tab.id === state.panelTab ? ' afk-selected' : ''}${tab.addOn ? ' afk-tab-addon' : ''}" data-afk-tab="${escapeHtml(tab.id)}">${escapeHtml(tab.title)}</div>`;
+		}).join('');
+		document.getElementById('afkPanelLive').innerHTML = liveHtml();
+
+		const body = document.getElementById('afkBakerMenu');
+		const current = tabs.filter(function (tab) { return tab.id === state.panelTab; })[0];
+		if (current.addOn) {
+			// The add-on fills its own container and handles its own events.
+			body.innerHTML = '';
+			const container = document.createElement('div');
+			container.className = 'afk-addon';
+			body.appendChild(container);
+			try {
+				current.addOn.render(container);
+			} catch (e) {
+				container.textContent = `This add-on's tab could not be drawn: ${String(e && e.message || e)}`;
+			}
+		} else {
+			body.innerHTML = TAB_HTML[state.panelTab] ? TAB_HTML[state.panelTab]() : '';
+		}
+		state.renderedDragonLevel = Game.dragonLevel;
+		watchLumpListWidth(body.querySelector('#afkLumpList'));
+	}
+
+	// The lump list's numbers move as lumps come in and levels are bought. They are written into the
+	// existing rows, so a target field being edited and a drag in progress are left alone.
+	function updateLumpList() {
+		const list = document.getElementById('afkLumpList');
+		if (!list) return;
+		const plan = lumpPlan();
+		const rows = list.querySelectorAll('[data-afk-row]');
+		if (rows.length !== plan.length) return;
+		plan.forEach(function (item, i) {
+			const row = rows[i];
+			const dragged = row.classList.contains('afk-drag-source');
+			row.className = `afk-row afk-status-${item.status}${dragged ? ' afk-drag-source' : ''}`;
+			row.querySelector('.afk-cur').textContent = item.building.level;
+			row.querySelector('.afk-status').textContent = item.status;
+			row.querySelector('.afk-need').textContent = item.cost > 0 ? Beautify(item.cost) : '-';
+		});
+		document.querySelectorAll('#afkBakerMenu .afk-tile').forEach(function (tile) {
+			const building = Game.Objects[tile.dataset.building];
+			if (!building) return;
+			tile.classList.toggle('afk-unowned', building.amount === 0);
+			tile.querySelector('.afk-tile-level').textContent = `Lv ${building.level}`;
+		});
 	}
 
 	function onMenuClick(event) {
-		const target = event.target.closest('[data-afk-toggle],[data-afk-cycle],[data-afk-lump]');
+		const target = event.target.closest('[data-afk-toggle],[data-afk-cycle],[data-afk-lump],[data-afk-tab],[data-afk-action],[data-afk-go]');
 		if (!target) return;
 		const s = settings();
-		if (target.dataset.afkLump) {
-			editLumpPriority(target.dataset.afkLump, Number(target.dataset.index));
-		} else if (target.dataset.afkToggle) {
-			const key = target.dataset.afkToggle;
+		const data = target.dataset;
+		if (data.afkTab || data.afkGo) {
+			state.panelTab = data.afkTab || data.afkGo;
+			document.getElementById('afkPanelBody').scrollTop = 0;
+		} else if (data.afkAction) {
+			const action = data.afkAction;
+			if (action === 'close') {
+				PlaySound('snd/tick.mp3');
+				closePanel();
+				return;
+			}
+			if (action === 'pause') setPaused(!state.paused);
+			else if (action === 'overlay') {
+				s.storeOverlay = !isOverlayOn();
+				applyOverlay();
+			} else if (action === 'export-copy') copyExport();
+			else if (action === 'import-check') checkImport();
+			else if (action === 'import-apply') applyImport();
+			else if (action === 'import-cancel') state.importDraft = { text: '', preview: null, error: '' };
+		} else if (data.afkLump) {
+			editLumpPriority(data.afkLump, Number(data.index));
+		} else if (data.afkToggle) {
+			const key = data.afkToggle;
 			s[key] = !s[key];
 			if (key === 'autoAscend') onAutoAscendToggled();
 		} else {
-			const key = target.dataset.afkCycle;
+			const key = data.afkCycle;
 			const options = Object.keys(CYCLE_OPTIONS[key]);
 			s[key] = options[(options.indexOf(s[key]) + 1) % options.length];
 			if (key === 'ascendMode' || key === 'wrinklerMode') recheckAscendWarning();
 		}
+		if (!data.afkAction || data.afkAction !== 'export-copy') state.exportCopied = false;
+		Game.tooltip.shouldHide = 1;
 		PlaySound('snd/tick.mp3');
 		renderMenuSection();
 	}
@@ -3099,6 +4016,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 	function onMenuInput(event) {
 		const dataset = event.target.dataset || {};
 		if (dataset.afkLumpField) state.lumpDraft[dataset.afkLumpField] = event.target.value;
+		if (dataset.afkImport !== undefined) state.importDraft.text = event.target.value;
 		if (dataset.afkLumpTarget !== undefined && /^\d+$/.test(event.target.value.trim())) {
 			const entry = lumpTargetEntry(event.target);
 			const level = clampInt(event.target.value, 1, MAX_TARGET_LEVEL, 1);
@@ -3123,8 +4041,12 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		if (key !== 'dragonAura1' && key !== 'dragonAura2') return;
 		if (select.value === '' || (isAuraName(select.value) && select.value !== other)) s[key] = select.value;
 		refreshStatusLine(Date.now(), true);
-		// Redraw so the other dropdown greys out this pick, once focus has settled.
-		setTimeout(renderMenuSection, 0);
+		// The other dropdown can't pick the same aura.
+		const otherKey = key === 'dragonAura1' ? 'dragonAura2' : 'dragonAura1';
+		const otherSelect = document.querySelector(`#afkBakerMenu [data-afk-select="${otherKey}"]`);
+		if (otherSelect) {
+			for (const option of otherSelect.options) option.disabled = option.value !== '' && option.value === s[key];
+		}
 	}
 
 	function onMenuChange(event) {
@@ -3138,9 +4060,9 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			const entry = lumpTargetEntry(input);
 			if (entry) entry.level = clampInt(input.value, 1, MAX_TARGET_LEVEL, entry.level);
 			input.value = entry ? entry.level : input.value;
+			// The row's status and needed lumps follow the new target.
+			updateLumpList();
 			refreshStatusLine(Date.now(), true);
-			// After focus has moved on (Tab, Enter, a click), so the redraw keeps whatever is focused then.
-			setTimeout(renderMenuSection, 0);
 			return;
 		}
 		if (input.dataset && input.dataset.afkSelect) {
@@ -3250,7 +4172,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		return null;
 	}
 
-	// Scrolls the Options menu while the pointer is held near its top or bottom edge.
+	// Scrolls the panel while the pointer is held near its top or bottom edge.
 	function autoScrollDuringDrag() {
 		const drag = state.drag;
 		if (!drag || !drag.scroller) return;
@@ -3362,18 +4284,35 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		document.body.classList.remove('afk-dragging');
 		const wasActive = drag.active;
 		state.drag = null;
-		if (wasActive || state.renderPending) {
-			state.renderPending = false;
-			renderMenuSection();
-		}
+		if (wasActive) renderMenuSection();
 	}
 
+	// Twice a second: the store ratings, the dot on the panel's tab, and the open tab's live parts.
 	function refreshStatusLine(now, force) {
 		if (!force && now - state.lastStatusRefresh < STATUS_REFRESH_MS) return;
 		state.lastStatusRefresh = now;
-		if (Game.onMenu !== 'prefs') return;
-		const el = document.getElementById('afkBakerStatus');
-		if (el) el.innerHTML = statusHtml();
+		refreshOverlay(now);
+		if (!ensurePanel()) return;
+
+		const s = settings();
+		const stopped = state.lastError || (s.autoBuy && (calc.paused || (calc.blocked && calc.fileSource !== null))) || (s.autoAscend && state.ascendWarning);
+		const dot = document.getElementById('afkOpenDot');
+		const dotClass = `afk-dot afk-dot-${state.paused ? 'wait' : stopped ? 'warn' : 'on'}`;
+		if (dot.className !== dotClass) dot.className = dotClass;
+		if (!state.panelOpen) return;
+
+		placePanel();
+		const live = liveHtml();
+		if (live !== state.lastLiveHtml) {
+			state.lastLiveHtml = live;
+			document.getElementById('afkPanelLive').innerHTML = live;
+		}
+		if (state.panelTab === 'lumps') updateLumpList();
+		// The aura lists show which auras are locked; redraw them when the dragon levels up, unless one is open.
+		if (state.panelTab === 'dragon' && Game.dragonLevel !== state.renderedDragonLevel) {
+			const focused = document.activeElement;
+			if (!focused || focused.tagName !== 'SELECT') renderMenuSection();
+		}
 	}
 
 	Game.registerMod(MOD_ID, mod);
