@@ -40,10 +40,13 @@ Every feature can be turned on or off in **AFK Baker's own panel**. Open it with
   - Both CpS numbers are unbuffed. A Frenzy would scale every item's PP alike, and a Building special lasts seconds, so neither should decide what to buy.
   - The numbers are recalculated only when something changes (a purchase, a new upgrade in the store, an achievement, a level, an aura and so on), spread over a few game ticks.
 - While it's waiting it checks about once a second. After each purchase it buys again as soon as the new payback periods are worked out.
+- **Fast buying**: right after an ascension, hundreds of items can pay for themselves in a fraction of a second, and which comes first hardly matters. While the best item's payback period is under 1 second, auto-buy takes everything else under 1 second that the bank can cover in the same go: the largest bundle (1, 10 or 100) of each building and each upgrade, up to 25 purchases at once, never touching the cookie reserve. Once the best payback period reaches a second, it goes back to careful one-at-a-time buying.
+  - The safety check still runs: the whole batch is simulated together before it is bought, and the game's CpS afterwards is checked against that prediction. After a miss, buying drops to one item at a time so the checks can show which item it was. After two missed batches, fast buying is switched off for the rest of the run, and the Dashboard says so.
+  - The status shows such tiny payback periods as `PP under 1 s`.
 - **Mute auto-buy purchase sounds** (on by default): AFK Baker's own purchases, building level-ups, dragon training, dragon petting, stock trades, broker hires, office upgrades and spell casts are silent. Your manual purchases, golden cookies and every other sound play as normal, and the volume isn't changed.
 - If the best item can't be bought at all (the purchase fails, or the game refuses it), it skips that item for a minute and moves on to the next best.
 - **Store ratings** (the "Show ratings in the store" setting on the Auto-buy tab): every upgrade in the store gets a small square in its corner, and every building's price takes a color, by how its payback period compares with the best one. The legend is next to the setting.
-  - **Best buy** (gold): the lowest payback period, which is what auto-buy buys next.
+  - **Best buy** (gold): the lowest payback period, which is what auto-buy buys next. While several items pay back in under a second they are all marked, since fast buying takes them together, and the rest are rated against that second.
   - **Close to best** (teal): up to 1.5 times the best. **Average** (light blue): up to 5 times. **Poor** (violet): more than 5 times.
   - **No payback period** (gray): the purchase doesn't raise your income.
   - **Bought by the research setting** (pale square with a dot): research, while Buy research is on.
@@ -51,6 +54,8 @@ Every feature can be turned on or off in **AFK Baker's own panel**. Open it with
   - Hovering an upgrade or a building adds a block to the game's tooltip with the rating in words, the payback period, its rank, how long until you can afford it and, for the gray and striped ones, why. So nothing depends on telling the colors apart. A building's tooltip lists buying 1, 10 and 100.
   - A building's price shows the rating for the amount the store is set to buy. It replaces the game's green or red price color; the game still dims a building you can't afford.
   - Click upgrades use their click payback period, the same as auto-buy.
+  - The ratings only change when a full recalculation is in, never halfway through one, and at most once a second while fast buying is at work, so the colors don't jump with every purchase.
+  - An upgrade for a building you own none of (the dragon's training can sacrifice them all) adds nothing for now; its tooltip says so.
   - The ratings only read numbers the payback calculation has already worked out. With auto-buy off or paused, the calculation keeps running for them, and nothing is bought.
   - If Cookie Monster is loaded, the ratings start switched off, because Cookie Monster draws its own colors in the store. You can turn them on anyway; the setting's tooltip says so.
 - **Cookie reserve**: how many cookies to keep banked. Lucky and Lucky + Frenzy are the bank sizes needed for a full Lucky payout.

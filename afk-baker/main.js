@@ -82,6 +82,14 @@
 	// Auto-buy pauses when this many of the last purchases were off.
 	const LIVE_CHECK_WINDOW = 10;
 	const LIVE_CHECK_MAX_MISSES = 3;
+	// Fast buying: while the best items pay for themselves in under this many seconds, the order they are
+	// bought in hardly matters, so auto-buy takes several of them at once.
+	const FAST_PP_SECONDS = 1;
+	const FAST_BATCH_MAX = 25;
+	// Fast buying stops for the rest of the run once this many batches changed CpS differently than predicted.
+	const FAST_MAX_MISSES = 2;
+	// While fast buying, the store ratings are refreshed this often at most.
+	const FAST_OVERLAY_REFRESH_MS = 1000;
 	// The game checks for count achievements every 5 seconds.
 	const COUNT_ACHIEVEMENT_WAIT_S = 6;
 	const CM_COMPARE_TOLERANCE = 0.01;
@@ -332,6 +340,8 @@
 		// Set after a purchase: buy again as soon as the payback data is ready, not a second later.
 		buyAgain: false,
 		recalcWaitSince: 0,
+		// Set while fast buying is at work: the store ratings are refreshed less often until then.
+		fastBuyingUntil: 0,
 		skipUntil: {}, // candidate key -> { until, reason }
 		lastDumpSignature: '',
 		nextLumpCheckAt: 0,
@@ -747,6 +757,10 @@
 		expectedAchievements: [], // { label, names, dueT }: count achievements a purchase should bring
 		recentChecks: [], // true for each of the last purchases that changed CpS as predicted
 		lastMiss: '',
+		checkedCount: 0, // purchases (or batches) checked against their prediction since the game loaded
+		missCount: 0,
+		fastBatches: 0, // batches bought by fast buying since the game loaded
+		fastMisses: 0, // batches that missed their prediction this run
 		paused: '', // why the purchase checks stopped auto-buy, or ''
 		comparison: null, // debug: the last comparison with Cookie Monster
 		comparisonSignature: '',
@@ -968,10 +982,9 @@
 		}
 	}
 
-	function simulatePurchase(candidate) {
-		const sim = calc.sim;
+	// Makes one purchase on the shadow.
+	function applyPurchase(sim, candidate) {
 		const shadow = sim.shadow;
-		resetSim(sim);
 		if (candidate.kind === 'building') {
 			const copy = shadow.Objects[candidate.name];
 			copy.amount += candidate.amount;
@@ -982,6 +995,17 @@
 			shadow.Upgrades[candidate.name] = Object.create(real, { bought: { value: 1 } });
 			if (Game.CountsAsUpgradeOwned(real.pool)) shadow.UpgradesOwned++;
 		}
+	}
+
+	function simulatePurchase(candidate) {
+		return simulatePurchases([candidate]);
+	}
+
+	// What the game's CpS would be after buying all of these together.
+	function simulatePurchases(candidates) {
+		const sim = calc.sim;
+		resetSim(sim);
+		for (const candidate of candidates) applyPurchase(sim, candidate);
 		return runSim(sim);
 	}
 
@@ -1167,6 +1191,11 @@
 		}
 	}
 
+	// A payback period for the status line. Right after an ascension they can be billionths of a second.
+	function ppText(seconds) {
+		return seconds < 1 ? 'under 1 s' : shortTime(seconds);
+	}
+
 	// The PP formula: how long until the item is affordable, plus how long it takes to pay for itself.
 	// CpS is the simulator's unbuffed CpS for the game as it is, which the self-check holds to the game's own.
 	function paybackPeriod(price, incomeGain) {
@@ -1178,6 +1207,8 @@
 	/* ----- Checking predictions against real purchases ----- */
 
 	function recordPurchaseCheck(matched, miss) {
+		calc.checkedCount++;
+		if (!matched) calc.missCount++;
 		calc.recentChecks.push(matched);
 		if (calc.recentChecks.length > LIVE_CHECK_WINDOW) calc.recentChecks.shift();
 		if (matched) return;
@@ -1193,13 +1224,14 @@
 		return calc.recentChecks.filter(function (matched) { return !matched; }).length;
 	}
 
-	// Simulates the purchase about to be made, with the clock at now, and remembers what it should do.
-	function predictPurchase(candidate, label) {
+	// Simulates what is about to be bought (one item, or a batch bought together), with the clock at
+	// now, and remembers what it should do to CpS.
+	function predictPurchase(candidates, label) {
 		const roundClock = calc.now;
 		calc.now = Date.now();
 		try {
-			const run = simulatePurchase(candidate);
-			calc.pendingCheck = { label: label, immediate: run.immediate, cps: run.cps, wins: run.wins, countWins: run.countWins, T: Game.T };
+			const run = simulatePurchases(candidates);
+			calc.pendingCheck = { label: label, batch: candidates.length > 1, immediate: run.immediate, cps: run.cps, wins: run.wins, countWins: run.countWins, T: Game.T };
 		} catch (e) {
 			calc.pendingCheck = null;
 		} finally {
@@ -1215,6 +1247,7 @@
 		calc.pendingCheck = null;
 		const actual = Game.unbuffedCps;
 		const matched = isClose(actual, check.immediate, LIVE_CHECK_TOLERANCE) || isClose(actual, check.cps, LIVE_CHECK_TOLERANCE);
+		if (!matched && check.batch) calc.fastMisses++;
 		recordPurchaseCheck(matched, `${check.label}: predicted ${Beautify(check.immediate, 1)} CpS, got ${Beautify(actual, 1)}`);
 		const due = Game.T + Game.fps * COUNT_ACHIEVEMENT_WAIT_S;
 		if (check.countWins.length) calc.expectedAchievements.push({ label: check.label, names: check.countWins, dueT: due });
@@ -1261,6 +1294,7 @@
 		calc.expectedAchievements = [];
 		calc.predictedWins = {};
 		calc.watchUntilT = 0;
+		calc.fastMisses = 0;
 	}
 
 	/* ----- Debug: comparison with Cookie Monster, if it is installed ----- */
@@ -1454,6 +1488,17 @@
 		return candidate.kind === 'building' ? `${candidate.amount}x ${candidate.name}` : candidate.name;
 	}
 
+	// "you own no Idleverses" for an upgrade that boosts a building of which none is owned (the dragon's
+	// training can sacrifice them all while their upgrades stay in the store), or ''.
+	function unownedBuildingNote(upgrade) {
+		const ties = [upgrade.buildingTie1, upgrade.buildingTie2, upgrade.buildingTie];
+		for (const tie of ties) {
+			const building = tie && Game.Objects[tie.name];
+			if (building && building.amount === 0) return `you own no ${building.plural}`;
+		}
+		return '';
+	}
+
 	// Every building bundle and upgrade with a useful PP, best first. Upgrades that are never
 	// auto-bought are left out here, before ranking, and listed in report.filtered for the debug dump.
 	// An upgrade that doesn't change CpS has an infinite PP. While the autoclicker is on, the ones
@@ -1486,13 +1531,13 @@
 			let incomeGain = outcome.gain;
 			if (!(incomeGain > 0)) {
 				if (clickRate <= 0) {
-					report.infinite.push(`${upgrade.name} (autoclicker off)`);
+					report.infinite.push(`${upgrade.name} (${unownedBuildingNote(upgrade) || 'autoclicker off'})`);
 					continue;
 				}
 				// The upgrade's extra click income stands in for extra CpS.
 				incomeGain = outcome.clickGain * clickRate;
 				if (!(incomeGain > 0)) {
-					report.infinite.push(`${upgrade.name} (no click income gain)`);
+					report.infinite.push(`${upgrade.name} (${unownedBuildingNote(upgrade) || 'no click income gain'})`);
 					continue;
 				}
 				candidate.tag = 'click';
@@ -1525,6 +1570,67 @@
 		return candidate.price + candidate.amount - 1;
 	}
 
+	// Fast buying. Right after an ascension hundreds of items pay for themselves in a fraction of a
+	// second, and which of them comes first hardly matters. So while the best item's payback period
+	// is under FAST_PP_SECONDS, everything else under it that the bank can cover is bought in the same
+	// tick: the largest such bundle of each building, and each such upgrade. Returns what to buy;
+	// fewer than two items means the usual one-at-a-time buying.
+	function fastBatch(candidates, now) {
+		// After a prediction miss, buy one at a time, so that the checks can show which item it was. A
+		// second batch that misses means buying together is itself the problem: no more batches this run.
+		if (recentMisses() > 0 || calc.fastMisses >= FAST_MAX_MISSES) return [];
+		let budget = Game.cookies - reserveAmount();
+		const batch = [];
+		const buildingsTaken = {};
+		for (const candidate of candidates) {
+			if (!(candidate.pp < FAST_PP_SECONDS) || batch.length >= FAST_BATCH_MAX) break;
+			if (unbuyableReason(candidate, now)) continue;
+			let pick = candidate;
+			if (candidate.kind === 'building') {
+				if (buildingsTaken[candidate.name]) continue;
+				// The largest bundle of this building that also pays back that fast and is affordable.
+				for (const other of candidates) {
+					if (other.kind !== 'building' || other.name !== candidate.name || !(other.pp < FAST_PP_SECONDS)) continue;
+					if (other.amount > pick.amount && purchaseCost(other) <= budget && !unbuyableReason(other, now)) pick = other;
+				}
+			}
+			if (purchaseCost(pick) > budget) continue;
+			if (pick.kind === 'building') buildingsTaken[pick.name] = true;
+			budget -= purchaseCost(pick);
+			batch.push(pick);
+		}
+		return batch;
+	}
+
+	// Buys a fast batch. The whole batch is simulated together first, and the game's CpS after it is
+	// checked against that prediction, the same as for a single purchase.
+	function buyFastBatch(batch, now) {
+		const labels = batch.map(candidateLabel);
+		const summary = `${batch.length} items (${labels.slice(0, 3).join(', ')}${batch.length > 3 ? ', ...' : ''})`;
+		predictPurchase(batch, summary);
+		let boughtCount = 0;
+		let complete = true;
+		for (const candidate of batch) {
+			const amountBefore = candidate.kind === 'building' ? Game.Objects[candidate.name].amount : 0;
+			const bought = candidate.kind === 'building' ?
+				buyBuilding(candidate.name, candidate.amount) :
+				tryBuyUpgrade(Game.Upgrades[candidate.name]);
+			if (bought) boughtCount++;
+			else skipCandidate(candidate, now, 'buying it failed');
+			if (!bought || (candidate.kind === 'building' && Game.Objects[candidate.name].amount - amountBefore !== candidate.amount)) complete = false;
+		}
+		// Anything short of the whole batch isn't what was predicted, so there is nothing to check it against.
+		if (!complete) calc.pendingCheck = null;
+		if (!boughtCount) {
+			state.buyStatus = `Couldn't buy ${summary}, skipping them for now.`;
+			return false;
+		}
+		calc.fastBatches++;
+		state.fastBuyingUntil = now + FAST_OVERLAY_REFRESH_MS * 2;
+		state.buyStatus = `Fast buying: bought ${summary}. Each pays for itself in under ${FAST_PP_SECONDS} s.`;
+		return true;
+	}
+
 	// Picks the lowest-PP candidate that can be bought and buys it, or saves up for it.
 	function buyBestByPP(now) {
 		const report = { filtered: [], infinite: [] };
@@ -1542,7 +1648,12 @@
 
 		let outcome = '';
 		let bought = false;
-		if (!chosen) {
+		const batch = chosen ? fastBatch(candidates, now) : [];
+		if (batch.length > 1) {
+			bought = buyFastBatch(batch, now);
+			outcome = bought ? `bought in a fast batch of ${batch.length}` : 'fast batch failed';
+			if (batch.indexOf(chosen) === -1) chosen = batch[0];
+		} else if (!chosen) {
 			state.buyStatus = candidates.length ?
 				`Nothing buyable: ${skipped.size} item(s) skipped for now (turn on debug logging for details).` :
 				'Nothing with a payback period to buy.';
@@ -1572,7 +1683,7 @@
 			return { outcome: 'waiting on the item', bought: false };
 		}
 
-		predictPurchase(candidate, label);
+		predictPurchase([candidate], label);
 		const amountBefore = candidate.kind === 'building' ? Game.Objects[candidate.name].amount : 0;
 		const bought = candidate.kind === 'building' ?
 			buyBuilding(candidate.name, candidate.amount) :
@@ -1585,7 +1696,7 @@
 			state.buyStatus = `Couldn't buy ${label}, skipping it for now.`;
 			return { outcome: 'buying it failed', bought: false };
 		}
-		state.buyStatus = `Bought ${label} (${candidate.tag ? candidate.tag + ' ' : ''}PP ${Beautify(candidate.pp, 1)}).`;
+		state.buyStatus = `Bought ${label} (${candidate.tag ? candidate.tag + ' ' : ''}PP ${ppText(candidate.pp)}).`;
 		return { outcome: 'bought', bought: true };
 	}
 
@@ -2536,7 +2647,7 @@
 
 	// The bands are a ratio to the best payback period, so they mean the same in a small store and a full one.
 	const RATINGS = {
-		best: { label: 'Best buy', legend: 'the lowest payback period: what auto-buy buys next' },
+		best: { label: 'Best buy', legend: 'the lowest payback period: what auto-buy buys next. While several items pay back in under a second, all of them are marked, and auto-buy takes them together' },
 		close: { label: 'Close to best', legend: `payback period up to ${CLOSE_RATIO} times the best` },
 		average: { label: 'Average', legend: `up to ${AVERAGE_RATIO} times the best` },
 		poor: { label: 'Poor', legend: `more than ${AVERAGE_RATIO} times the best` },
@@ -2559,6 +2670,8 @@
 		ratings: new Map(), // candidate key -> { rating, pp, rank, tag, why }
 		ranked: 0, // how many items have a payback period
 		hover: '', // the id of the store item under the mouse
+		fast: false, // several items pay back in under a second: they all count as the best buy
+		nextRatingAt: 0,
 		watching: false,
 	};
 
@@ -2580,10 +2693,11 @@
 	// Rates everything in the store from the cached payback results. The best buy is the item auto-buy
 	// would take: the lowest payback period among the items it can buy right now.
 	function computeRatings(now) {
+		// The ratings only change when a full round of payback results is in. Between rounds (after every
+		// purchase the results start over) the store keeps the ratings it has, so nothing blinks.
+		if (!calc.ready || !calc.base) return;
 		const ratings = new Map();
 		overlay.ratings = ratings;
-		overlay.ranked = 0;
-		if (!calc.base || !calc.results.size) return;
 		const report = { filtered: [], infinite: [] };
 		const candidates = rankCandidates(report);
 		overlay.ranked = candidates.length;
@@ -2594,11 +2708,17 @@
 				break;
 			}
 		}
-		const bestPP = best ? best.pp : candidates.length ? candidates[0].pp : 0;
+		let bestPP = best ? best.pp : candidates.length ? candidates[0].pp : 0;
+		// While the best items pay back in under a second, they are all as good as each other and auto-buy
+		// takes them together: all are marked Best buy, and the rest are rated against that second.
+		const fast = bestPP < FAST_PP_SECONDS;
+		overlay.fast = fast;
+		if (fast) bestPP = FAST_PP_SECONDS;
 		candidates.forEach(function (candidate, i) {
 			const held = candidate === best ? '' : unbuyableReason(candidate, now);
+			const isBest = candidate === best || (fast && candidate.pp < FAST_PP_SECONDS);
 			ratings.set(candidateKey(candidate), {
-				rating: candidate === best ? 'best' : ratingFor(candidate.pp, bestPP),
+				rating: isBest ? 'best' : ratingFor(candidate.pp, bestPP),
 				pp: candidate.pp, rank: i + 1, tag: candidate.tag || '', why: held ? `auto-buy is passing over it for now: ${held}` : '',
 			});
 		});
@@ -2619,6 +2739,8 @@
 				const outcome = calc.results.get(key);
 				if (!outcome) continue; // not worked out yet
 				let why = "it doesn't raise your income, so it never pays for itself";
+				const unowned = unownedBuildingNote(upgrade);
+				if (unowned) why = `${unowned}, so for now it adds nothing`;
 				if (outcome.gain < 0) why = 'it lowers your CpS';
 				else if (outcome.clickGain > 0 && clickRate <= 0) why = 'it only raises click income, and the autoclicker is off';
 				ratings.set(key, { rating: 'none', why: why });
@@ -2705,6 +2827,7 @@
 
 	function entryRows(entry) {
 		let rows = '';
+		if (entry.rating === 'best' && overlay.fast) rows += tipRow('Fast buying', 'everything that pays back in under a second is bought together');
 		if (entry.pp !== undefined) {
 			rows += tipRow('Payback period', shortTime(entry.pp) + (entry.tag === 'click' ? ` (click upgrade, at ${effectiveClickRate().toFixed(1)} clicks per second)` : '')) +
 				tipRow('Rank', `${entry.rank} of ${overlay.ranked}`);
@@ -2785,8 +2908,13 @@
 
 	function refreshOverlay(now) {
 		watchStore();
-		if (isOverlayOn()) computeRatings(now);
-		else overlay.ratings = new Map();
+		if (!isOverlayOn()) {
+			overlay.ratings = new Map();
+		} else if (now >= overlay.nextRatingAt) {
+			computeRatings(now);
+			// While fast buying is going through the store, the ratings are redone once a second at most.
+			if (calc.ready && now < state.fastBuyingUntil) overlay.nextRatingAt = now + FAST_OVERLAY_REFRESH_MS;
+		}
 		applyOverlay();
 	}
 
@@ -3301,6 +3429,10 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		return [`CpS predictions: ${misses} of the last ${calc.recentChecks.length} purchases were off (last: ${calc.lastMiss})`];
 	}
 
+	function fastBuyingNote() {
+		return calc.fastMisses >= FAST_MAX_MISSES ? ` Fast buying is off for this run: ${calc.fastMisses} batches changed CpS differently than predicted.` : '';
+	}
+
 	function statusLines() {
 		const s = settings();
 		const progress = prestigeProgress();
@@ -3569,6 +3701,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			}
 		} else if (/^(Working|Waiting)/.test(status)) dot = 'wait';
 		predictionLines().forEach(function (line) { now += ' ' + line + '.'; });
+		now += fastBuyingNote();
 		return { tab: 'autobuy', name: 'Auto-buy', dot: dot, now: now, wait: wait };
 	}
 
