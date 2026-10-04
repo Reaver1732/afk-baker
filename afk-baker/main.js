@@ -723,6 +723,17 @@
 		shadow.Unlock = function () {};
 		shadow.Notify = function () {};
 		shadow.computeLumpTimes = function () {};
+		// Other mods' official hooks ('cps', 'cookiesPerClick') are part of the game's CpS, so they run in
+		// the simulation too. A hook that reads the game's state has to see the shadow's for a simulated
+		// purchase to count, so each hook is rebuilt like the game's own functions where that is possible.
+		shadow.runModHookOnValue = function (hook, value) {
+			const hooks = Game.modHooks[hook] || [];
+			for (let i = 0; i < hooks.length; i++) value = runHook(sim, hooks[i], value);
+			return value;
+		};
+		sim.hooks = new Map(); // another mod's hook function -> its copy for the shadow, or null
+		sim.inBase = false;
+		sim.rebindHook = copyOf;
 
 		shadow.Objects = {};
 		shadow.ObjectsById = [];
@@ -844,9 +855,51 @@
 		};
 	}
 
+	// Runs another mod's hook for the simulation. The copy that reads the shadow is used only once it
+	// has given the same answer as the original for the game as it is (a hook that uses variables of
+	// its own mod can't be rebuilt, and fails or differs). Until then, and for hooks without a usable
+	// copy, the original runs: its answer is right for the game as it is, but it won't see a simulated
+	// purchase. The check after each real purchase covers that case.
+	function runHook(sim, hook, value) {
+		let entry = sim.hooks.get(hook);
+		if (!entry) {
+			entry = { copy: null, trusted: false };
+			try {
+				entry.copy = sim.rebindHook(hook);
+			} catch (e) {
+				entry.copy = null;
+			}
+			sim.hooks.set(hook, entry);
+		}
+		if (!entry.copy) return hook(value);
+		if (entry.trusted) {
+			try {
+				return entry.copy(value);
+			} catch (e) {
+				entry.copy = null;
+				return hook(value);
+			}
+		}
+		const original = hook(value);
+		if (!sim.inBase) return original;
+		try {
+			if (entry.copy(value) === original) entry.trusted = true;
+			else entry.copy = null;
+		} catch (e) {
+			entry.copy = null;
+		}
+		return original;
+	}
+
 	function simulateBase() {
-		resetSim(calc.sim);
-		return runSim(calc.sim);
+		const sim = calc.sim;
+		resetSim(sim);
+		sim.inBase = true;
+		try {
+			return runSim(sim);
+		} finally {
+			sim.inBase = false;
+		}
 	}
 
 	function simulatePurchase(candidate) {
