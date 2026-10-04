@@ -1,13 +1,13 @@
 /*
  * AFK Baker: plays Cookie Clicker (Steam) while you're away.
- * Requires the Cookie Monster mod for payback period (PP) data.
+ * Works out payback periods (PP) itself, by running the game's own CpS code on a copy of the game's state.
  * MIT License. See LICENSE.
  */
 (function () {
 	'use strict';
 
 	const MOD_ID = 'afk baker';
-	const VERSION = '1.10.0';
+	const VERSION = '2.0.0';
 	// Settings saved before a default changed are reset to the new default:
 	// v1 had auto-ascend on, v2 had Elder Pledge on, v3 had the Auto reserve.
 	const SETTINGS_VERSION = 4;
@@ -61,14 +61,49 @@
 	const MAX_CLICK_RATE = 50;
 	const MAX_AUTO_RESERVE_MINUTES = 1440;
 	const BUY_INTERVAL_MS = 1000;
-	// Cookie Monster has PP data for buying 1, 10 and 100 of each building (Objects1/10/100).
+	// Payback periods are worked out for buying 1, 10 and 100 of each building.
 	const BUY_AMOUNTS = [1, 10, 100];
-	// Cookie Monster rebuilds its data every logic tick, but only recalculates income after the game's
-	// CalculateGains, which runs at the start of the tick after a purchase. Its hook can run before or
-	// after ours, so the second refresh seen after a purchase is the first one that is certainly fresh.
-	const FRESH_DATA_REFRESHES = 2;
+	// How long the payback simulations may run per logic tick; a full round is spread over several ticks.
+	const PP_TICK_BUDGET_MS = 8;
+	// The game's functions the simulator needs its own copies of, because they read state a purchase changes.
+	const SHADOWED_FUNCTIONS = ['Has', 'HasAchiev', 'hasBuff', 'GetTieredCpsMult', 'UnlockTiered', 'mouseCps'];
+	// How Game.CalculateGains starts in the game's main.js.
+	const GAME_CALCULATE_GAINS = 'Game.CalculateGains=function()';
+	// What the text of the real Game.CalculateGains contains, and a wrapper around it doesn't.
+	const CALCULATES_CPS = /Game\.unbuffedCps\s*=/;
+	const MAX_SETTLE_PASSES = 6;
+	// The simulator's CpS for the unchanged game must match the game's own. The game only recalculates
+	// its CpS every 10 seconds, and Cyclius can move it by nearly 0.1% in that time.
+	const SELF_CHECK_TOLERANCE = 0.002;
+	const SELF_CHECK_RETRY_MS = 5000;
+	const SELF_CHECK_GRACE_MS = 12000;
+	// After each purchase the game's new CpS must match the prediction made just before buying.
+	const LIVE_CHECK_TOLERANCE = 0.001;
+	// Auto-buy pauses when this many of the last purchases were off.
+	const LIVE_CHECK_WINDOW = 10;
+	const LIVE_CHECK_MAX_MISSES = 3;
+	// The game checks for count achievements every 5 seconds.
+	const COUNT_ACHIEVEMENT_WAIT_S = 6;
+	const CM_COMPARE_TOLERANCE = 0.01;
+	const RECALC_WAIT_NOTICE_MS = 5000;
+	// Achievements for owning this many of every building, of buildings in total, and of upgrades.
+	const EVERY_BUILDING_ACHIEVEMENTS = [
+		[100, 'Centennial'], [150, 'Centennial and a half'], [200, 'Bicentennial'], [250, 'Bicentennial and a half'],
+		[300, 'Tricentennial'], [350, 'Tricentennial and a half'], [400, 'Quadricentennial'], [450, 'Quadricentennial and a half'],
+		[500, 'Quincentennial'], [550, 'Quincentennial and a half'], [600, 'Sexcentennial'], [650, 'Sexcentennial and a half'],
+		[700, 'Septcentennial'],
+	];
+	const BUILDINGS_OWNED_ACHIEVEMENTS = [
+		[100, 'Builder'], [500, 'Architect'], [1000, 'Engineer'], [2500, 'Lord of Constructs'], [5000, 'Grand design'],
+		[7500, 'Ecumenopolis'], [10000, 'Myriad'],
+	];
+	const UPGRADES_OWNED_ACHIEVEMENTS = [
+		[20, 'Enhancer'], [50, 'Augmenter'], [100, 'Upgrader'], [200, 'Lord of Progress'], [300, 'The full picture'],
+		[400, "When there's nothing left to add"], [500, 'Kaizen'], [600, 'Beyond quality'], [700, "Oft we mar what's well"],
+	];
+	const HALLOWEEN_COOKIES = ['Skull cookies', 'Ghost cookies', 'Bat cookies', 'Slime cookies', 'Pumpkin cookies', 'Eyeball cookies', 'Spider cookies'];
+	const CHRISTMAS_COOKIES = ['Christmas tree biscuits', 'Snowflake biscuits', 'Snowman biscuits', 'Holly biscuits', 'Candy cane biscuits', 'Bell biscuits', 'Present biscuits'];
 	const SKIP_UNBUYABLE_MS = 60000;
-	const STALE_PRICE_SKIP_MS = 5000;
 	const DEBUG_TOP_CANDIDATES = 5;
 	// How long the autoclicker's landed clicks are counted to measure its real click rate.
 	const CLICK_RATE_WINDOW_MS = 10000;
@@ -271,13 +306,10 @@
 		nextBuyAt: 0,
 		buyResumeAt: 0,
 		buyStatus: 'Starting up.',
-		// Set after a purchase: buy again as soon as Cookie Monster's data is fresh, not a second later.
+		// Set after a purchase: buy again as soon as the payback data is ready, not a second later.
 		buyAgain: false,
-		lastMonsterData: null,
-		refreshesSinceBuy: FRESH_DATA_REFRESHES,
+		recalcWaitSince: 0,
 		skipUntil: {}, // candidate key -> { until, reason }
-		stalePriceKey: '',
-		stalePriceSince: 0,
 		lastDumpSignature: '',
 		nextLumpCheckAt: 0,
 		lastHarvest: '',
@@ -425,9 +457,10 @@
 	function onReincarnate() {
 		state.ascendTriggered = false;
 		state.ascendWarning = false;
-		// Cookie Monster's data still describes the previous run for a moment.
+		// The game is still setting up the new run for a moment.
 		state.buyResumeAt = Date.now() + REINCARNATE_GRACE_MS;
 		state.skipUntil = {};
+		forgetPurchaseChecks();
 		forgetDragonRun();
 		forgetMarketRun();
 		forgetGrimoireRun();
@@ -438,6 +471,7 @@
 		state.ascendWarning = false;
 		state.buyResumeAt = Date.now() + REINCARNATE_GRACE_MS;
 		state.skipUntil = {};
+		forgetPurchaseChecks();
 		forgetDragonRun();
 		forgetMarketRun();
 		forgetGrimoireRun();
@@ -615,6 +649,565 @@
 	}
 
 	/* =====================================================================
+	   PAYBACK PERIODS
+	   What a purchase would add to CpS is worked out by running the game's own CpS code on a copy of
+	   the game's state. The copy (the "shadow") inherits everything from Game and holds its own
+	   building amounts, upgrade flags and achievement flags. The game's functions are rebuilt from
+	   their source so that "Game" inside them means the shadow. Nothing in the real game is changed.
+
+	   Everything here is unbuffed: a Frenzy scales every payback period alike, and a building buff
+	   lasts seconds, so neither should decide what to buy.
+	   ===================================================================== */
+
+	const calc = {
+		sim: null,
+		source: '', // which copy of Game.CalculateGains the simulator runs: 'game' (the live function) or 'file'
+		// The function's text from the game's own main.js: undefined until asked for, null while loading,
+		// '' if it couldn't be read.
+		fileSource: undefined,
+		// The simulator's clock. Fixed for one round of calculations, so that time-based boosts (Century egg,
+		// Cyclius) are the same in every simulation of the round.
+		now: 0,
+		signature: '',
+		ready: false,
+		blocked: '', // why the self-check failed, or ''
+		verified: false, // the current simulator has matched the game at least once
+		mismatchSince: 0, // when a verified simulator stopped matching, or 0
+		retryAt: 0,
+		queue: [],
+		base: null,
+		results: new Map(), // candidate key -> outcome of buying it
+		pendingCheck: null, // the last purchase, until the game has recalculated its CpS
+		expectedAchievements: [], // { label, names, dueT }: count achievements a purchase should bring
+		recentChecks: [], // true for each of the last purchases that changed CpS as predicted
+		lastMiss: '',
+		paused: '', // why the purchase checks stopped auto-buy, or ''
+		comparison: null, // debug: the last comparison with Cookie Monster
+		comparisonSignature: '',
+		achievementsSeen: null, // debug: the achievements that were won at the last look
+		predictedWins: {}, // debug: achievements the recent purchases were predicted to bring
+		watchUntilT: 0, // debug: Game.T until which a newly won achievement counts as following a purchase
+	};
+	mod.calc = calc;
+
+	// Rebuilds a game function so that "Game" and "Date" inside it are ours. CalculateGains assigns to
+	// "name" without declaring it; the var keeps that off the window.
+	function rebind(source, shadow, clock) {
+		return new Function('Game', 'Date', 'var name; return (' + source + ');')(shadow, clock);
+	}
+
+	function buildSim(calculateGainsSource) {
+		const shadow = Object.create(Game);
+		const sim = { shadow: shadow, pairs: [], wins: [] };
+		const clock = new Proxy(Date, {
+			get: function (target, key) {
+				return key === 'now' ? function () { return calc.now; } : Reflect.get(target, key);
+			},
+		});
+		const copyOf = function (fn) { return rebind(fn.toString(), shadow, clock); };
+
+		for (const name of SHADOWED_FUNCTIONS) shadow[name] = copyOf(Game[name]);
+		shadow.CalculateGains = rebind(calculateGainsSource, shadow, clock);
+		// What the game's functions would do to the real game is replaced by harmless versions.
+		shadow.Win = function (what) {
+			if (typeof what !== 'string') {
+				for (const i in what) shadow.Win(what[i]);
+				return;
+			}
+			const real = Game.Achievements[what];
+			if (!real || shadow.Achievements[what].won) return;
+			shadow.Achievements[what] = Object.create(real, { won: { value: 1 } });
+			if (Game.CountsAsAchievementOwned(real.pool)) shadow.AchievementsOwned++;
+			sim.wins.push(what);
+		};
+		shadow.Unlock = function () {};
+		shadow.Notify = function () {};
+		shadow.computeLumpTimes = function () {};
+
+		shadow.Objects = {};
+		shadow.ObjectsById = [];
+		for (const real of Game.ObjectsById) {
+			const copy = Object.create(real);
+			copy.cps = copyOf(real.cps);
+			// A building's buy function unlocks upgrades and wins the achievements for owning that many.
+			copy.buyFunction = real.buyFunction ? copyOf(real.buyFunction) : null;
+			shadow.Objects[real.name] = copy;
+			shadow.ObjectsById[real.id] = copy;
+			sim.pairs.push({ real: real, copy: copy });
+		}
+		// Synergy upgrades point at the real buildings; the copies get ones that point at the shadow's.
+		for (const pair of sim.pairs) {
+			const synergies = pair.real.synergies || [];
+			pair.copy.synergies = synergies.map(function (synergy) {
+				return Object.create(synergy, {
+					buildingTie1: { value: shadow.Objects[synergy.buildingTie1.name] },
+					buildingTie2: { value: shadow.Objects[synergy.buildingTie2.name] },
+				});
+			});
+		}
+		return sim;
+	}
+
+	// Puts the shadow back to the game's current state.
+	function resetSim(sim) {
+		const shadow = sim.shadow;
+		for (const pair of sim.pairs) pair.copy.amount = pair.real.amount;
+		shadow.Upgrades = Object.create(Game.Upgrades);
+		shadow.Achievements = Object.create(Game.Achievements);
+		shadow.AchievementsOwned = Game.AchievementsOwned;
+		shadow.UpgradesOwned = Game.UpgradesOwned;
+		shadow.BuildingsOwned = Game.BuildingsOwned;
+		shadow.cookiesMultByType = {};
+		shadow.cookiesPsByType = {};
+		shadow.buffs = {};
+		// Without these the shadow would show the game's own numbers if the CpS code never wrote any.
+		shadow.unbuffedCps = NaN;
+		shadow.computedMouseCps = NaN;
+		sim.wins = [];
+	}
+
+	// The achievements for owning buildings and upgrades that the game hands out in its check every
+	// five seconds (Game.Logic in main.js, from "var buildingsOwned=0;" on). This list is the one part
+	// of the calculator that mirrors game code by hand; the check after each purchase watches it.
+	function winCountAchievements(shadow) {
+		const buildings = shadow.ObjectsById;
+		let owned = 0;
+		let minAmount = 100000;
+		let mathematician = true;
+		let base10 = true;
+		for (const building of buildings) {
+			owned += building.amount;
+			minAmount = Math.min(building.amount, minAmount);
+			if (building.amount < Math.min(128, Math.pow(2, buildings.length - building.id - 1))) mathematician = false;
+			if (building.amount < (buildings.length - building.id) * 10) base10 = false;
+		}
+		const upgrades = shadow.UpgradesOwned;
+		const winAt = function (value, steps) {
+			for (const step of steps) {
+				if (value >= step[0]) shadow.Win(step[1]);
+			}
+		};
+		const hasAll = function (names) {
+			return names.every(function (name) { return shadow.Has(name); });
+		};
+		const countOwned = function (names) {
+			return names.filter(function (name) { return shadow.Has(name); }).length;
+		};
+
+		if (minAmount >= 1) shadow.Win('One with everything');
+		if (mathematician) shadow.Win('Mathematician');
+		if (base10) shadow.Win('Base 10');
+		winAt(minAmount, EVERY_BUILDING_ACHIEVEMENTS);
+		winAt(owned, BUILDINGS_OWNED_ACHIEVEMENTS);
+		winAt(upgrades, UPGRADES_OWNED_ACHIEVEMENTS);
+		if (owned >= 4000 && upgrades >= 300) shadow.Win('Polymath');
+		if (owned >= 8000 && upgrades >= 400) shadow.Win('Renaissance baker');
+		if (shadow.Objects['Cursor'].amount + shadow.Objects['Grandma'].amount >= 777) shadow.Win('The elder scrolls');
+
+		const kittens = (Game.UpgradesByPool['kitten'] || []).map(function (upgrade) { return upgrade.name; });
+		if (countOwned(kittens) >= 10) shadow.Win('Jellicles');
+		const grandmaTypes = countOwned(Game.GrandmaSynergies || []);
+		if (grandmaTypes >= 7) shadow.Win('Elder');
+		if (grandmaTypes >= 14) shadow.Win('Veteran');
+		if (hasAll(HALLOWEEN_COOKIES)) shadow.Win('Spooky cookies');
+		if (hasAll(CHRISTMAS_COOKIES)) shadow.Win('Let it snow');
+		if (shadow.Has('Prism heart biscuits')) shadow.Win('Lovely cookies');
+	}
+
+	// CpS achievements are won inside CalculateGains, after the milk they add has been counted, so it
+	// runs again until no more are won. The real game counts that milk at its next recalculation.
+	function settleSim(sim) {
+		const shadow = sim.shadow;
+		for (let pass = 0; pass < MAX_SETTLE_PASSES; pass++) {
+			const owned = shadow.AchievementsOwned;
+			shadow.CalculateGains();
+			if (shadow.AchievementsOwned === owned) break;
+		}
+	}
+
+	// immediate: unbuffed CpS as the game has it right after the purchase, from one recalculation.
+	// cps: once the milk of every achievement the purchase brings is counted, including the count
+	// achievements from the game's five-second check.
+	function runSim(sim) {
+		const shadow = sim.shadow;
+		const ownedBefore = shadow.AchievementsOwned;
+		shadow.CalculateGains();
+		const immediate = shadow.unbuffedCps;
+		if (shadow.AchievementsOwned !== ownedBefore) settleSim(sim);
+		const winsBefore = sim.wins.length;
+		winCountAchievements(shadow);
+		const countWins = sim.wins.slice(winsBefore);
+		if (countWins.length) settleSim(sim);
+		return {
+			immediate: immediate, cps: shadow.unbuffedCps, mouseCps: shadow.computedMouseCps,
+			wins: sim.wins.slice(), countWins: countWins,
+		};
+	}
+
+	function simulateBase() {
+		resetSim(calc.sim);
+		return runSim(calc.sim);
+	}
+
+	function simulatePurchase(candidate) {
+		const sim = calc.sim;
+		const shadow = sim.shadow;
+		resetSim(sim);
+		if (candidate.kind === 'building') {
+			const copy = shadow.Objects[candidate.name];
+			copy.amount += candidate.amount;
+			shadow.BuildingsOwned += candidate.amount;
+			if (copy.buyFunction) copy.buyFunction();
+		} else {
+			const real = Game.Upgrades[candidate.name];
+			shadow.Upgrades[candidate.name] = Object.create(real, { bought: { value: 1 } });
+			if (Game.CountsAsUpgradeOwned(real.pool)) shadow.UpgradesOwned++;
+		}
+		return runSim(sim);
+	}
+
+	// False for NaN.
+	function isClose(a, b, tolerance) {
+		return Math.abs(a - b) <= tolerance * Math.max(Math.abs(a), Math.abs(b));
+	}
+
+	// The body of a function in the game's main.js, found by the line it starts on and the first later
+	// line that closes it at the same indentation. '' if it isn't there.
+	function extractFunctionSource(text, opening) {
+		const at = text.indexOf(opening);
+		if (at === -1) return '';
+		const indent = text.slice(text.lastIndexOf('\n', at) + 1, at);
+		if (/\S/.test(indent)) return '';
+		const closing = new RegExp('\\n' + indent + '\\}\\r?\\n');
+		const rest = text.slice(at);
+		const match = closing.exec(rest);
+		if (!match) return '';
+		return rest.slice(opening.indexOf('function'), match.index + 1 + indent.length + 1);
+	}
+
+	// Another mod may have swapped Game.CalculateGains for a wrapper that calls the original (Cookie
+	// Monster does). A wrapper can't be rebuilt, so the original is read from the game's own script.
+	function loadGameSource() {
+		calc.fileSource = null;
+		const urls = Array.from(document.querySelectorAll('script[src]'))
+			.map(function (script) { return script.src; })
+			.filter(function (src) { return /(^|\/)main\.js(\?|$)/.test(src); });
+		const tryNext = function () {
+			const url = urls.shift();
+			if (!url) {
+				calc.fileSource = '';
+				return;
+			}
+			const request = new XMLHttpRequest();
+			request.onload = function () {
+				const source = extractFunctionSource(String(request.responseText || ''), GAME_CALCULATE_GAINS);
+				if (!source) return tryNext();
+				calc.fileSource = source;
+				calc.retryAt = 0;
+			};
+			request.onerror = tryNext;
+			try {
+				request.open('GET', url);
+				request.send();
+			} catch (e) {
+				tryNext();
+			}
+		};
+		tryNext();
+	}
+
+	// Why the simulator's CpS for the game as it is doesn't match the game's own, or ''.
+	function baseProblem() {
+		calc.base = null;
+		try {
+			calc.base = simulateBase();
+		} catch (e) {
+			return `the game's CpS code could not be run on a copy (${String(e && e.message || e)})`;
+		}
+		if (!isClose(calc.base.immediate, Game.unbuffedCps, SELF_CHECK_TOLERANCE)) {
+			return `it gives ${Beautify(calc.base.immediate, 1)} CpS where the game has ${Beautify(Game.unbuffedCps, 1)}`;
+		}
+		return '';
+	}
+
+	function selfCheckPassed() {
+		calc.verified = true;
+		calc.mismatchSince = 0;
+		return '';
+	}
+
+	// The self-check: the simulator must reproduce the game's own unbuffed CpS before any of its numbers
+	// are used. Tries the simulator it has, then a fresh one from the live function, then one from the
+	// game's file. Returns what is wrong, or ''.
+	function selfCheck(now) {
+		if (calc.sim) {
+			if (!baseProblem()) return selfCheckPassed();
+			// The game's own number can be out of date for up to 10 seconds: the milk of an achievement won
+			// during a recalculation is only counted at the next one. A simulator that has matched before
+			// is trusted for that long; the check after each purchase still runs.
+			if (calc.verified && calc.base) {
+				if (!calc.mismatchSince) calc.mismatchSince = now;
+				if (now - calc.mismatchSince < SELF_CHECK_GRACE_MS) return '';
+			}
+		}
+		let problem = '';
+		for (const kind of ['game', 'file']) {
+			const source = kind === 'game' ? String(Game.CalculateGains) : calc.fileSource;
+			if (!source) continue;
+			// A wrapper that calls the original must not be rebuilt: on the shadow it would run the real
+			// function on the real game. Only the function that does the calculation itself will do.
+			if (!CALCULATES_CPS.test(source)) {
+				problem = "another mod has replaced the game's CpS function and the original could not be read";
+				continue;
+			}
+			try {
+				calc.sim = buildSim(source);
+				calc.source = kind;
+				calc.verified = false;
+			} catch (e) {
+				calc.sim = null;
+				problem = `the game's CpS code could not be copied (${String(e && e.message || e)})`;
+				continue;
+			}
+			problem = baseProblem();
+			if (!problem) return selfCheckPassed();
+		}
+		if (calc.fileSource === undefined) loadGameSource();
+		if (calc.fileSource === null) return "reading the game's own CpS code";
+		return problem;
+	}
+
+	// Changes whenever something that affects a purchase's CpS gain does. Game.unbuffedCps moves with
+	// nearly all of it (levels, auras, gods, plants, seasons, achievements); the rest is what is on offer.
+	function paybackSignature() {
+		let signature = `${Game.unbuffedCps}|${Game.AchievementsOwned}|${Game.UpgradesOwned}`;
+		for (const building of Game.ObjectsById) signature += `|${building.amount}`;
+		for (const upgrade of Game.UpgradesInStore) signature += `|u${upgrade.id}`;
+		return signature;
+	}
+
+	function paybackCandidates() {
+		const candidates = [];
+		for (const upgrade of Game.UpgradesInStore) {
+			if (upgrade.bought || upgrade.pool === 'tech' || BLOCKED_POOLS.indexOf(upgrade.pool) !== -1) continue;
+			candidates.push({ kind: 'upgrade', name: upgrade.name, amount: 1 });
+		}
+		for (const name in Game.Objects) {
+			for (const amount of BUY_AMOUNTS) candidates.push({ kind: 'building', name: name, amount: amount });
+		}
+		return candidates;
+	}
+
+	function purchaseOutcome(candidate) {
+		const run = simulatePurchase(candidate);
+		return {
+			gain: run.cps - calc.base.cps,
+			clickGain: run.mouseCps - calc.base.mouseCps,
+			immediate: run.immediate, cps: run.cps, wins: run.wins, countWins: run.countWins,
+		};
+	}
+
+	function startPaybackRound(signature, now) {
+		calc.signature = signature;
+		calc.ready = false;
+		calc.results = new Map();
+		calc.queue = [];
+		calc.now = Date.now();
+		calc.blocked = selfCheck(now);
+		// While blocked or in doubt, the check is repeated every few seconds even if nothing changes.
+		calc.retryAt = now + SELF_CHECK_RETRY_MS;
+		if (calc.blocked) return;
+		calc.queue = paybackCandidates();
+	}
+
+	// Keeps the payback data current: starts a new round when the game changed, and does a few
+	// milliseconds of simulations per tick until the round is done.
+	function refreshPayback(now) {
+		// The game is about to recalculate its CpS; its numbers and ours can't be compared until it has.
+		if (Game.recalculateGains) return;
+		checkLastPurchase();
+		checkExpectedAchievements();
+		noteUnpredictedAchievements();
+		const signature = paybackSignature();
+		if (signature !== calc.signature || ((calc.blocked || calc.mismatchSince) && now >= calc.retryAt)) startPaybackRound(signature, now);
+		if (calc.blocked) return;
+		const deadline = performance.now() + PP_TICK_BUDGET_MS;
+		while (calc.queue.length && performance.now() < deadline) {
+			const candidate = calc.queue.pop();
+			try {
+				calc.results.set(candidateKey(candidate), purchaseOutcome(candidate));
+			} catch (e) {
+				calc.blocked = `buying ${candidateLabel(candidate)} could not be simulated (${String(e && e.message || e)})`;
+				calc.retryAt = now + SELF_CHECK_RETRY_MS;
+				return;
+			}
+		}
+		if (!calc.queue.length && !calc.ready) {
+			calc.ready = true;
+			compareWithCookieMonster();
+		}
+	}
+
+	// The PP formula: how long until the item is affordable, plus how long it takes to pay for itself.
+	// CpS is the simulator's unbuffed CpS for the game as it is, which the self-check holds to the game's own.
+	function paybackPeriod(price, incomeGain) {
+		const payback = price / incomeGain;
+		const cps = calc.base ? calc.base.immediate : 0;
+		return cps > 0 ? Math.max(price - Game.cookies, 0) / cps + payback : payback;
+	}
+
+	/* ----- Checking predictions against real purchases ----- */
+
+	function recordPurchaseCheck(matched, miss) {
+		calc.recentChecks.push(matched);
+		if (calc.recentChecks.length > LIVE_CHECK_WINDOW) calc.recentChecks.shift();
+		if (matched) return;
+		calc.lastMiss = miss;
+		console.log(`${LOG_PREFIX} CpS prediction was off: ${miss}`);
+		if (recentMisses() >= LIVE_CHECK_MAX_MISSES) {
+			calc.paused = `${recentMisses()} of the last ${calc.recentChecks.length} purchases changed CpS differently ` +
+				`than predicted (last: ${miss})`;
+		}
+	}
+
+	function recentMisses() {
+		return calc.recentChecks.filter(function (matched) { return !matched; }).length;
+	}
+
+	// Simulates the purchase about to be made, with the clock at now, and remembers what it should do.
+	function predictPurchase(candidate, label) {
+		const roundClock = calc.now;
+		calc.now = Date.now();
+		try {
+			const run = simulatePurchase(candidate);
+			calc.pendingCheck = { label: label, immediate: run.immediate, cps: run.cps, wins: run.wins, countWins: run.countWins, T: Game.T };
+		} catch (e) {
+			calc.pendingCheck = null;
+		} finally {
+			calc.now = roundClock;
+		}
+	}
+
+	// Called once the game has recalculated its CpS after our purchase. The count achievements come up
+	// to five seconds later, so either prediction counts as a match.
+	function checkLastPurchase() {
+		const check = calc.pendingCheck;
+		if (!check || Game.T <= check.T) return;
+		calc.pendingCheck = null;
+		const actual = Game.unbuffedCps;
+		const matched = isClose(actual, check.immediate, LIVE_CHECK_TOLERANCE) || isClose(actual, check.cps, LIVE_CHECK_TOLERANCE);
+		recordPurchaseCheck(matched, `${check.label}: predicted ${Beautify(check.immediate, 1)} CpS, got ${Beautify(actual, 1)}`);
+		const due = Game.T + Game.fps * COUNT_ACHIEVEMENT_WAIT_S;
+		if (check.countWins.length) calc.expectedAchievements.push({ label: check.label, names: check.countWins, dueT: due });
+		calc.watchUntilT = due;
+		for (const name of check.wins) calc.predictedWins[name] = true;
+	}
+
+	// A count achievement a purchase was predicted to bring must be there after the game's next check.
+	function checkExpectedAchievements() {
+		while (calc.expectedAchievements.length && Game.T >= calc.expectedAchievements[0].dueT) {
+			const expected = calc.expectedAchievements.shift();
+			const missing = expected.names.filter(function (name) { return !Game.HasAchiev(name); });
+			if (missing.length) recordPurchaseCheck(false, `${expected.label}: expected the achievement "${missing[0]}", which the game did not give`);
+		}
+	}
+
+	// Debug only: achievements won soon after one of our purchases that the purchase did not predict.
+	// Most are unrelated (cookies baked, clicks); one about buildings or upgrades would be a gap in
+	// winCountAchievements.
+	function noteUnpredictedAchievements() {
+		if (!settings().debug) {
+			calc.achievementsSeen = null;
+			return;
+		}
+		const seen = calc.achievementsSeen;
+		const won = {};
+		for (const name in Game.Achievements) {
+			if (Game.Achievements[name].won) won[name] = true;
+		}
+		calc.achievementsSeen = won;
+		if (!seen) return;
+		if (Game.T > calc.watchUntilT) {
+			calc.predictedWins = {};
+			return;
+		}
+		for (const name in won) {
+			if (seen[name] || hasKey(calc.predictedWins, name)) continue;
+			debugLog(`Achievement "${name}" was won soon after a purchase and was not predicted. That is fine unless it is for owning buildings or upgrades.`);
+		}
+	}
+
+	function forgetPurchaseChecks() {
+		calc.pendingCheck = null;
+		calc.expectedAchievements = [];
+		calc.predictedWins = {};
+		calc.watchUntilT = 0;
+	}
+
+	/* ----- Debug: comparison with Cookie Monster, if it is installed ----- */
+
+	function hasCpsBuff() {
+		for (const name in Game.buffs) {
+			if (typeof Game.buffs[name].multCpS !== 'undefined' && Game.buffs[name].multCpS !== 1) return true;
+		}
+		return false;
+	}
+
+	function ownsSynergyUpgrade(buildingName) {
+		return (Game.Objects[buildingName].synergies || []).some(function (synergy) { return Game.Has(synergy.name); });
+	}
+
+	// Why our PP for a candidate may differ from Cookie Monster's.
+	function differenceReason(candidate, ours, monster) {
+		if (monster.price !== undefined && !isClose(monster.price, candidate.price, CM_COMPARE_TOLERANCE)) return "Cookie Monster's data is out of date";
+		if (hasCpsBuff()) return 'a buff is active: Cookie Monster uses buffed CpS, AFK Baker unbuffed';
+		if (candidate.tag === 'click') return 'click upgrade: AFK Baker counts the autoclicker, Cookie Monster does not';
+		if (isClose(ours.gain, monster.bonus, CM_COMPARE_TOLERANCE)) return 'same CpS gain: the bank or current CpS differs (Cookie Monster can count wrinklers)';
+		const reasons = [];
+		if (candidate.kind === 'building' && ownsSynergyUpgrade(candidate.name)) reasons.push('synergy upgrades owned: AFK Baker counts the boost to the partner buildings');
+		if (ours.wins.length) reasons.push(`AFK Baker expects ${ours.wins.length} achievement(s)`);
+		return reasons.join('; ') || 'unexplained';
+	}
+
+	// With debug logging on and Cookie Monster loaded: both PPs for every candidate, and a log of the ones
+	// more than 1% apart with the likely reason. AFK Baker never uses Cookie Monster's numbers.
+	function compareWithCookieMonster() {
+		const data = window.CookieMonsterData;
+		if (!settings().debug || !data || !data.Objects1 || !data.Upgrades) {
+			calc.comparison = null;
+			return;
+		}
+		const report = { filtered: [], infinite: [] };
+		const rows = [];
+		for (const candidate of rankCandidates(report)) {
+			const monster = candidate.kind === 'building' ?
+				(data['Objects' + candidate.amount] || {})[candidate.name] : data.Upgrades[candidate.name];
+			if (!monster || typeof monster.pp !== 'number') continue;
+			const ours = calc.results.get(candidateKey(candidate));
+			const agrees = isClose(candidate.pp, monster.pp, CM_COMPARE_TOLERANCE);
+			rows.push({
+				item: candidateLabel(candidate), agrees: agrees,
+				pp: candidate.pp, monsterPP: monster.pp, gain: ours.gain, monsterGain: monster.bonus,
+				reason: agrees ? '' : differenceReason(candidate, ours, monster),
+			});
+		}
+		const differing = rows.filter(function (row) { return !row.agrees; });
+		calc.comparison = { total: rows.length, agreeing: rows.length - differing.length, rows: rows };
+		const signature = differing.map(function (row) { return `${row.item}|${row.reason}`; }).join(';') + '#' + rows.length;
+		if (signature === calc.comparisonSignature) return;
+		calc.comparisonSignature = signature;
+		console.log(`${LOG_PREFIX} Cookie Monster comparison: ${rows.length - differing.length} of ${rows.length} payback periods within 1%.`);
+		if (differing.length) {
+			console.table(differing.map(function (row) {
+				return {
+					item: row.item, 'AFK Baker PP': Number(row.pp.toPrecision(4)), 'Cookie Monster PP': Number(Number(row.monsterPP).toPrecision(4)),
+					'AFK Baker gain': Beautify(row.gain, 1), 'Cookie Monster gain': Beautify(row.monsterGain, 1), reason: row.reason,
+				};
+			}));
+		}
+	}
+
+	/* =====================================================================
 	   AUTO-BUY
 	   ===================================================================== */
 
@@ -655,22 +1248,8 @@
 	}
 
 	function isUsefulPP(pp) {
-		// Cookie Monster uses Infinity for upgrades with no CpS effect, and <= 0 for harmful ones.
+		// Infinite for a purchase with no income effect, <= 0 for a harmful one.
 		return typeof pp === 'number' && Number.isFinite(pp) && pp > 0;
-	}
-
-	function getMonsterData() {
-		const data = window.CookieMonsterData;
-		if (!data || !data.Objects1 || !data.Upgrades) return null;
-		return data;
-	}
-
-	// Cookie Monster replaces Objects1 with a new object each time it refreshes its data.
-	function trackMonsterRefresh(data) {
-		const objects = data && data.Objects1;
-		if (!objects || objects === state.lastMonsterData) return;
-		state.lastMonsterData = objects;
-		state.refreshesSinceBuy++;
 	}
 
 	// Runs one of our own actions with the sounds matching `pattern` suppressed. PlaySound is a global the
@@ -694,10 +1273,10 @@
 		return withSoundsMuted(PURCHASE_SOUND, purchase);
 	}
 
-	// Anything of ours that changes buildings or CpS outside the PP buyer: make the buyer wait for
-	// Cookie Monster to catch up, then carry on straight away.
+	// Anything of ours that changes buildings or CpS outside the PP buyer: the last purchase can no longer
+	// be checked on its own, and the buyer carries on as soon as the payback data has caught up.
 	function noteGameChanged() {
-		state.refreshesSinceBuy = 0;
+		calc.pendingCheck = null;
 		state.buyAgain = true;
 	}
 
@@ -756,58 +1335,24 @@
 		return candidate.kind === 'building' ? `${candidate.amount}x ${candidate.name}` : candidate.name;
 	}
 
-	// The product of the temporary click buffs (Click frenzy, Dragonflight...), as Game.mouseCps applies them.
-	function clickBuffMultiplier() {
-		let mult = 1;
-		for (const name in Game.buffs) {
-			if (typeof Game.buffs[name].multClick !== 'undefined') mult *= Game.buffs[name].multClick;
-		}
-		return mult;
-	}
-
-	// Cookies per click the upgrade would add, from calling Game.mouseCps with the upgrade marked as
-	// bought. mouseCps only reads game state, plus the cookiesPerClick mod hook, which Cookie Monster's
-	// own simulation calls as well, so this has no side effects. Temporary click buffs are divided out
-	// so that buying during a Click frenzy doesn't make click upgrades look 777 times better.
-	function clickGainPerClick(upgrade, baseMouseCps) {
-		const wasBought = upgrade.bought;
-		upgrade.bought = 1;
-		let withUpgrade;
-		try {
-			withUpgrade = Game.mouseCps();
-		} finally {
-			upgrade.bought = wasBought;
-		}
-		const buffMult = clickBuffMultiplier();
-		return buffMult > 0 ? (withUpgrade - baseMouseCps) / buffMult : 0;
-	}
-
-	// Cookie Monster's PP formula, with the upgrade's extra click income standing in for extra CpS.
-	function clickPP(price, incomeGain) {
-		const payback = price / incomeGain;
-		return Game.cookiesPs ? Math.max(price - Game.cookies, 0) / Game.cookiesPs + payback : payback;
-	}
-
 	// Every building bundle and upgrade with a useful PP, best first. Upgrades that are never
 	// auto-bought are left out here, before ranking, and listed in report.filtered for the debug dump.
-	// Cookie Monster gives upgrades that don't change CpS an infinite PP. While the autoclicker is on,
-	// the ones that raise click income get a click PP instead; the rest go in report.infinite.
-	function rankCandidates(data, report) {
+	// An upgrade that doesn't change CpS has an infinite PP. While the autoclicker is on, the ones
+	// that raise click income get a click PP instead; the rest go in report.infinite.
+	function rankCandidates(report) {
 		const candidates = [];
 		for (const name in Game.Objects) {
 			const building = Game.Objects[name];
 			for (const amount of BUY_AMOUNTS) {
-				const objects = data['Objects' + amount];
-				const entry = objects && objects[name];
-				if (!entry || !isUsefulPP(entry.pp)) continue;
-				candidates.push({
-					kind: 'building', name: name, amount: amount, pp: entry.pp,
-					price: building.getSumPrice(amount), monsterPrice: entry.price,
-				});
+				const candidate = { kind: 'building', name: name, amount: amount };
+				const outcome = calc.results.get(candidateKey(candidate));
+				if (!outcome || !(outcome.gain > 0)) continue;
+				candidate.price = building.getSumPrice(amount);
+				candidate.pp = paybackPeriod(candidate.price, outcome.gain);
+				if (isUsefulPP(candidate.pp)) candidates.push(candidate);
 			}
 		}
 		const clickRate = effectiveClickRate();
-		const baseMouseCps = clickRate > 0 ? Game.mouseCps() : 0;
 		for (const upgrade of Game.UpgradesInStore) {
 			// Research is handled separately by its own toggle.
 			if (upgrade.pool === 'tech') continue;
@@ -816,24 +1361,25 @@
 				report.filtered.push(`${upgrade.name} (${reason})`);
 				continue;
 			}
-			const entry = data.Upgrades[upgrade.name];
-			if (!entry) continue;
-			const price = upgrade.getPrice();
-			if (isUsefulPP(entry.pp)) {
-				candidates.push({ kind: 'upgrade', name: upgrade.name, amount: 1, pp: entry.pp, price: price });
-				continue;
+			const candidate = { kind: 'upgrade', name: upgrade.name, amount: 1, price: upgrade.getPrice() };
+			const outcome = calc.results.get(candidateKey(candidate));
+			if (!outcome || outcome.gain < 0) continue; // < 0: it lowers CpS
+			let incomeGain = outcome.gain;
+			if (!(incomeGain > 0)) {
+				if (clickRate <= 0) {
+					report.infinite.push(`${upgrade.name} (autoclicker off)`);
+					continue;
+				}
+				// The upgrade's extra click income stands in for extra CpS.
+				incomeGain = outcome.clickGain * clickRate;
+				if (!(incomeGain > 0)) {
+					report.infinite.push(`${upgrade.name} (no click income gain)`);
+					continue;
+				}
+				candidate.tag = 'click';
 			}
-			if (entry.pp !== Infinity) continue; // <= 0: Cookie Monster says it lowers CpS
-			if (clickRate <= 0) {
-				report.infinite.push(`${upgrade.name} (autoclicker off)`);
-				continue;
-			}
-			const gain = clickGainPerClick(upgrade, baseMouseCps) * clickRate;
-			if (!(gain > 0)) {
-				report.infinite.push(`${upgrade.name} (no click income gain)`);
-				continue;
-			}
-			candidates.push({ kind: 'upgrade', name: upgrade.name, amount: 1, pp: clickPP(price, gain), price: price, tag: 'click' });
+			candidate.pp = paybackPeriod(candidate.price, incomeGain);
+			if (isUsefulPP(candidate.pp)) candidates.push(candidate);
 		}
 		candidates.sort(function (a, b) { return a.pp - b.pp; });
 		return candidates;
@@ -854,11 +1400,6 @@
 		state.skipUntil[candidateKey(candidate)] = { until: now + SKIP_UNBUYABLE_MS, reason: reason };
 	}
 
-	// Cookie Monster's price lagging the real price means its PP numbers are out of date.
-	function hasStalePrice(candidate) {
-		return candidate.kind === 'building' && Math.abs(candidate.monsterPrice - candidate.price) > candidate.price * 0.01;
-	}
-
 	// Object.buy() charges each building's rounded-up price, which can add up to a few cookies more
 	// than getSumPrice(). Allow for that so a bundle is never cut short.
 	function purchaseCost(candidate) {
@@ -866,9 +1407,9 @@
 	}
 
 	// Picks the lowest-PP candidate that can be bought and buys it, or saves up for it.
-	function buyBestByPP(data, now) {
+	function buyBestByPP(now) {
 		const report = { filtered: [], infinite: [] };
-		const candidates = rankCandidates(data, report);
+		const candidates = rankCandidates(report);
 		const skipped = new Map();
 		let chosen = null;
 		for (const candidate of candidates) {
@@ -897,22 +1438,6 @@
 
 	function decideAndBuy(candidate, now) {
 		const label = candidateLabel(candidate);
-		const key = candidateKey(candidate);
-		if (hasStalePrice(candidate)) {
-			if (state.stalePriceKey !== key) {
-				state.stalePriceKey = key;
-				state.stalePriceSince = now;
-			} else if (now - state.stalePriceSince >= STALE_PRICE_SKIP_MS) {
-				// It's not catching up, so move on to the next best item instead of waiting forever.
-				skipCandidate(candidate, now, "Cookie Monster's price stayed out of date");
-				state.buyStatus = `Waiting on Cookie Monster data: its price for ${label} stayed out of date, skipping it for now.`;
-				return { outcome: 'skipped next time, price stayed out of date', bought: false };
-			}
-			state.buyStatus = `Waiting on Cookie Monster data: its price for ${label} is out of date.`;
-			return { outcome: 'waiting on Cookie Monster data', bought: false };
-		}
-		state.stalePriceKey = '';
-
 		const reserve = reserveAmount();
 		const cost = purchaseCost(candidate);
 		const shortfall = cost + reserve - Game.cookies;
@@ -928,9 +1453,14 @@
 			return { outcome: 'waiting on the item', bought: false };
 		}
 
+		predictPurchase(candidate, label);
+		const amountBefore = candidate.kind === 'building' ? Game.Objects[candidate.name].amount : 0;
 		const bought = candidate.kind === 'building' ?
 			buyBuilding(candidate.name, candidate.amount) :
 			tryBuyUpgrade(Game.Upgrades[candidate.name]);
+		// A bundle cut short isn't what was predicted, so there is nothing to check it against.
+		const complete = candidate.kind !== 'building' || Game.Objects[candidate.name].amount - amountBefore === candidate.amount;
+		if (!bought || !complete) calc.pendingCheck = null;
 		if (!bought) {
 			skipCandidate(candidate, now, 'buying it failed');
 			state.buyStatus = `Couldn't buy ${label}, skipping it for now.`;
@@ -970,39 +1500,52 @@
 	}
 
 	function runAutoBuy(now) {
-		const data = getMonsterData();
-		trackMonsterRefresh(data);
-		const fresh = state.refreshesSinceBuy >= FRESH_DATA_REFRESHES;
-		// Right after a purchase, go again as soon as the data is fresh. Otherwise check once a second.
-		if (!(state.buyAgain && fresh) && now < state.nextBuyAt) return;
-		state.buyAgain = false;
-		state.nextBuyAt = now + BUY_INTERVAL_MS;
-
 		const s = settings();
 		if (!s.autoBuy) {
 			state.buyStatus = 'Off.';
+			// Turning auto-buy off and on again is how the player resumes after the purchase checks paused it.
+			calc.paused = '';
+			calc.recentChecks = [];
+			forgetPurchaseChecks();
 			return;
 		}
+		refreshPayback(now);
+		if (Game.recalculateGains) {
+			// Something changed this tick. The game recalculates at the start of the next one; buying on
+			// the old numbers would also leave the last purchase unchecked.
+			if (!state.recalcWaitSince) state.recalcWaitSince = now;
+			if (now - state.recalcWaitSince >= RECALC_WAIT_NOTICE_MS) state.buyStatus = 'Waiting for the game to recalculate its CpS.';
+			return;
+		}
+		state.recalcWaitSince = 0;
+		if (calc.paused) {
+			state.buyStatus = `Paused: ${calc.paused}. Turn auto-buy off and on to resume.`;
+			return;
+		}
+		// Right after a purchase, go again as soon as the payback data is ready. Otherwise check once a second.
+		if (!(state.buyAgain && calc.ready) && now < state.nextBuyAt) return;
+		state.buyAgain = false;
+		state.nextBuyAt = now + BUY_INTERVAL_MS;
+
 		if (now < state.buyResumeAt) {
 			state.buyStatus = 'Waiting for the new run to settle.';
 			return;
 		}
-		if (!data) {
-			state.buyStatus = 'Waiting on Cookie Monster data: not loaded yet (Cookie Monster is required).';
+		// While the game's file is still being read, the check isn't over yet.
+		if (calc.blocked && calc.fileSource !== null) {
+			state.buyStatus = `Paused: AFK Baker's CpS check failed: ${calc.blocked}. Another mod may be changing how CpS ` +
+				'is calculated. It checks again every few seconds.';
 			return;
 		}
-		if (!fresh) {
-			state.buyStatus = 'Waiting on Cookie Monster data: it has not refreshed since the last purchase.';
+		if (!calc.ready) {
+			state.buyStatus = 'Working out payback periods.';
 			return;
 		}
 
 		const bought = (s.elderPledge && buyElderPledgeItems()) ||
 			(s.buyResearch && buyResearch()) ||
-			buyBestByPP(data, now);
-		if (bought) {
-			state.buyAgain = true;
-			state.refreshesSinceBuy = 0;
-		}
+			buyBestByPP(now);
+		if (bought) state.buyAgain = true;
 	}
 
 	/* =====================================================================
@@ -1093,7 +1636,10 @@
 		} finally {
 			Game.prefs.askLumps = savedAskLumps;
 		}
-		return building.level > levelBefore;
+		const levelled = building.level > levelBefore;
+		// A level raises the building's CpS.
+		if (levelled) noteGameChanged();
+		return levelled;
 	}
 
 	// Building levels are the only thing lumps are ever spent on. A building that isn't owned yet is
@@ -2281,6 +2827,13 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		return [line];
 	}
 
+	// Shown while any of the last purchases changed CpS differently than predicted.
+	function predictionLines() {
+		const misses = recentMisses();
+		if (!misses) return [];
+		return [`CpS predictions: ${misses} of the last ${calc.recentChecks.length} purchases were off (last: ${calc.lastMiss})`];
+	}
+
 	function statusLines() {
 		const s = settings();
 		const progress = prestigeProgress();
@@ -2292,9 +2845,10 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 
 		const lines = [
 			`Auto-buy: ${state.buyStatus}`,
+		].concat(predictionLines(), [
 			`Cookie reserve: ${Beautify(reserveAmount())} (${reserveLabel()})`,
 			wrinklerLine(),
-		].concat(lumpLines(), dragonLines(), marketLines(), grimoireLines(), [ascendLine]);
+		]).concat(lumpLines(), dragonLines(), marketLines(), grimoireLines(), [ascendLine]);
 		if (s.autoAscend && state.ascendWarning) {
 			lines.push('WARNING: Threshold already reached. Toggle auto-ascend off and on to confirm.');
 		}
@@ -2320,7 +2874,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			listing(toggleButton('clickFortunes', 'Fortune tickers') + cycleButton('fortuneMode', 'Click')) +
 
 			heading('Auto-buy') +
-			listing(toggleButton('autoBuy', 'Auto-buy') + note("buys Cookie Monster's lowest-PP upgrade or building (1, 10 or 100 at once), and waits for it rather than buying worse items")) +
+			listing(toggleButton('autoBuy', 'Auto-buy') + note("buys the upgrade or building (1, 10 or 100 at once) with the lowest payback period, and waits for it rather than buying worse items")) +
 			listing(note('with the autoclicker on, click upgrades such as the mouse upgrades are ranked by the click income they add')) +
 			listing(toggleButton('muteBuySounds', 'Mute auto-buy purchase sounds') + note('only purchases made by AFK Baker; your own purchases still make a sound')) +
 			listing(cycleButton('reserveMode', 'Cookie reserve') + note('Off by default; Lucky = 6,000x unbuffed CpS, Lucky + Frenzy = 42,000x')) +

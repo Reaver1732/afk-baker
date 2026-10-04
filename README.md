@@ -1,6 +1,6 @@
 # AFK Baker
 
-A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building (1, 10 or 100 at a time) or upgrade according to [Cookie Monster](https://steamcommunity.com/sharedfiles/filedetails/?id=2685721341), harvests and spends sugar lumps, trains Krumblor the dragon, trades on the Stock Market, casts Grimoire spells, and ascends when you reach a prestige goal.
+A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building (1, 10 or 100 at a time) or upgrade by its own payback-period calculation, harvests and spends sugar lumps, trains Krumblor the dragon, trades on the Stock Market, casts Grimoire spells, and ascends when you reach a prestige goal.
 
 It uses only the game's built-in mod API (`Game.registerMod`). CCSE is not needed.
 
@@ -23,10 +23,15 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
 - **Fortune tickers**: click every fortune, or only the ones that unlock fortune upgrades.
 
 **Auto-buy**
-- Picks the item with the lowest payback period (PP) according to Cookie Monster: any upgrade, or 1, 10 or 100 of any building. A bundle of 10 or 100 is bought in one purchase through the game's own bulk buy. The store's Buy/Sell mode and bulk setting are left as you had them. If it can't afford the best item yet, it waits and saves up rather than buying something worse.
-- While it's waiting it checks about once a second. After each purchase it buys again as soon as Cookie Monster has recalculated (about 15 purchases a second when there's a lot to buy), and it never buys twice using the same out-of-date data.
+- Picks the item with the lowest payback period (PP): any upgrade, or 1, 10 or 100 of any building. A bundle of 10 or 100 is bought in one purchase through the game's own bulk buy. The store's Buy/Sell mode and bulk setting are left as you had them. If it can't afford the best item yet, it waits and saves up rather than buying something worse.
+- **How PP is worked out**: PP = max(price − bank, 0) / CpS + price / CpS gain. That is the time until you can afford the item plus the time it takes to pay for itself.
+  - The CpS gain comes from running the game's own CpS code on a copy of your game with the purchase made. The copy is separate from your game, so nothing in your game is changed. Because it is the game's own code, building CpS, upgrade multipliers, milk and kittens, synergies, dragon auras, Pantheon gods, Garden plants and seasons are all counted the way the game counts them.
+  - Achievements a purchase would win are counted too, since they add milk: the ones for owning a number of one building, of every building, of buildings in total and of upgrades, and the ones for reaching a CpS.
+  - Both CpS numbers are unbuffed. A Frenzy would scale every item's PP alike, and a Building special lasts seconds, so neither should decide what to buy.
+  - The numbers are recalculated only when something changes (a purchase, a new upgrade in the store, an achievement, a level, an aura and so on), spread over a few game ticks.
+- While it's waiting it checks about once a second. After each purchase it buys again as soon as the new payback periods are worked out.
 - **Mute auto-buy purchase sounds** (on by default): AFK Baker's own purchases, building level-ups, dragon training, dragon petting, stock trades, broker hires, office upgrades and spell casts are silent. Your manual purchases, golden cookies and every other sound play as normal, and the volume isn't changed.
-- If the best item can't be bought at all (the purchase fails, the game refuses it, or Cookie Monster's price for it stays out of date), it skips that item for a minute and moves on to the next best.
+- If the best item can't be bought at all (the purchase fails, or the game refuses it), it skips that item for a minute and moves on to the next best.
 - **Cookie reserve**: how many cookies to keep banked. Lucky and Lucky + Frenzy are the bank sizes needed for a full Lucky payout.
   - **Off** (default): no reserve. Updating from 1.2 or earlier switches the reserve to Off once. After that, your choice is kept.
   - **Auto**: no reserve for the first 30 minutes of a run, then the same as Lucky. You can change the number of minutes.
@@ -48,13 +53,14 @@ Every feature can be turned on or off in **Options → AFK Baker**. Settings are
   - Elder Covenant and Revoke Elder Covenant
 
   To add more upgrades, edit `NEVER_BUY_UPGRADES` at the top of `main.js`.
-- **Click upgrades**: Cookie Monster gives upgrades that only boost clicking (Plastic mouse, Iron mouse and the rest, Halo gloves and so on) an infinite PP, because they don't change CpS. While the autoclicker is on, AFK Baker gives them their own PP:
-  - It asks the game's `Game.mouseCps` how much each click would earn with the upgrade, and multiplies the gain by the clicks per second the autoclicker really lands. It measures the landed rate over 10-second windows, so clicks lost while the window is heavily throttled are counted.
-  - PP = max(price − bank, 0) / CpS + price / click income gain, the same formula Cookie Monster uses, so they rank fairly against buildings and other upgrades.
-  - Temporary click buffs such as Click frenzy are left out, so a frenzy doesn't make them look better than they are.
-  - Upgrades Cookie Monster already gives a finite PP (for example cursor upgrades that also boost Cursors) keep Cookie Monster's number.
+- **Click upgrades**: upgrades that only boost clicking (Plastic mouse, Iron mouse and the rest, Halo gloves and so on) don't change CpS, so their PP would be infinite. While the autoclicker is on, AFK Baker gives them their own PP:
+  - It runs the game's `Game.mouseCps` on the same copy of your game to see how much each click would earn with the upgrade, and multiplies the gain by the clicks per second the autoclicker really lands. It measures the landed rate over 10-second windows, so clicks lost while the window is heavily throttled are counted.
+  - PP = max(price − bank, 0) / CpS + price / click income gain, the same formula as for everything else, so they rank fairly against buildings and other upgrades.
+  - Temporary buffs such as Click frenzy and Frenzy are left out, so a frenzy doesn't make them look better than they are.
+  - Upgrades that raise CpS as well (for example cursor upgrades that also boost Cursors) are ranked by their CpS gain.
 - Other upgrades with no CpS effect (infinite PP) are skipped. Research is the exception and has its own switch.
-- Pauses during ascension, for a few seconds after reincarnating, and whenever Cookie Monster's data is missing or out of date.
+- Pauses during ascension and for a few seconds after reincarnating.
+- **Safety checks**: before using its numbers, AFK Baker checks that its copy gives the same CpS as the game for your game as it is. If it doesn't (another mod may be changing how CpS is calculated), auto-buy pauses, says so in the status line, and checks again every few seconds. After every purchase it also compares the game's new CpS with what it predicted. A miss is logged to the console with the item and noted in the status line; after 3 misses in the last 10 purchases auto-buy pauses and says why, until you turn it off and on again.
 
 **Sugar lumps** (nothing happens until sugar lumps are unlocked on your save, at a billion cookies baked in total)
 - **Auto-harvest sugar lumps** (on by default): harvests the current lump as soon as it's **ripe**, never while it's only mature, because a mature harvest has a 50% chance of giving nothing. It uses the game's own ripe time, which already includes your upgrades, Pantheon and dragon aura, and the game's own harvest (`Game.clickLump`).
@@ -181,13 +187,14 @@ How the market works, in short:
 - **Safety guard**: auto-ascend only fires when you cross the threshold during play. If the threshold is already reached when the mod loads, when you turn auto-ascend on, or when you change the threshold, type or wrinkler mode, the mod shows a warning instead of ascending. To confirm, toggle auto-ascend off and on again.
 
 **Other**
-- **Debug logging**: extra console output. When the auto-buy decision changes, it prints the top 5 candidates (name, amount, PP, price, and why each was chosen or skipped; click upgrades are tagged `click`). It also lists the upgrades filtered out before ranking, and any infinite-PP upgrades that are still being skipped.
+- **Debug logging**: extra console output. When the auto-buy decision changes, it prints the top 5 candidates (name, amount, PP, price, and why each was chosen or skipped; click upgrades are tagged `click`). It also lists the upgrades filtered out before ranking, and any infinite-PP upgrades that are still being skipped. If Cookie Monster is installed as well, debug logging compares the two: it logs how many payback periods agree within 1% and lists the ones that differ, with the likely reason. AFK Baker never uses Cookie Monster's numbers for its decisions.
 
 The Options section also shows a live status line:
 - what auto-buy is doing. When it's waiting, it shows the target, its price, the reserve and how many more cookies are needed, and says which of these it's waiting on:
   - **Waiting on the item**: the bank can't cover the item yet, e.g. `saving for 10x Grandma (1.2 trillion) + reserve (8.4 trillion), need 3.1 trillion more`.
   - **Waiting on reserve**: the item is affordable, but buying it would dip into the reserve.
-  - **Waiting on Cookie Monster data**: Cookie Monster isn't loaded, or its numbers are out of date.
+  - **Working out payback periods**: it is recalculating after something changed. This takes a moment.
+  - **Paused**: a safety check failed. The line says which one and what to do.
 - your current reserve
 - how many wrinklers are feeding, and how many cookies they would pay out
 - sugar lumps owned, the time until the current lump is ripe, and the last harvest
@@ -206,7 +213,7 @@ Other mods can replace a few of AFK Baker's decisions through its extension hook
 ## Requirements
 
 - Cookie Clicker on Steam (tested against version 2.053).
-- **Cookie Monster**, the Steam Workshop version. Subscribe to it and enable it in the Mods menu. Cookie Monster downloads its code from GitHub when the game starts, so it needs an internet connection.
+- No other mods. Cookie Monster is no longer needed. You can keep it for its display features; AFK Baker works with or without it.
 
 ## Installation
 
@@ -217,7 +224,7 @@ Other mods can replace a few of AFK Baker's decisions through its extension hook
    ```
    The folder must contain `info.txt` and `main.js`.
 3. Start the game and open **Options → Mods** (the "Manage mods" button).
-4. Enable **Cookie Monster** and **AFK Baker**. Make sure Cookie Monster is listed above AFK Baker, then restart the game when asked.
+4. Enable **AFK Baker**, then restart the game when asked.
 5. Open **Options** and scroll down to the **AFK Baker** section to adjust the settings.
 
 If you use other automation mods (for example FortuneHelper or Grandma's Rolling Pin), disable them so they don't fight over the same purchases and clicks.
@@ -226,7 +233,7 @@ If you use other automation mods (for example FortuneHelper or Grandma's Rolling
 
 Inspired by [FortuneHelper](https://steamcommunity.com/sharedfiles/filedetails/?id=2693901672) and [Grandma's Rolling Pin](https://steamcommunity.com/sharedfiles/filedetails/?id=3199859496). No code from either mod is used. AFK Baker is written from scratch against the game's own source.
 
-The payback-period data comes from [Cookie Monster](https://github.com/CookieMonsterTeam/CookieMonster).
+The payback period formula is the one [Cookie Monster](https://github.com/CookieMonsterTeam/CookieMonster) made standard, and AFK Baker relied on Cookie Monster's numbers until version 2.0. No Cookie Monster code is used: the CpS gains come from the game's own code.
 
 The Stock Market's "always buy under $5" and "sell once past the bank ceiling" rules come from [KarmicChaos's Ultimate Stock Market Guide](https://steamcommunity.com/sharedfiles/filedetails/?id=2601428565), which also explains how the market works.
 
