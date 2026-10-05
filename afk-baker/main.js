@@ -82,6 +82,13 @@
 	// Auto-buy pauses when this many of the last purchases were off.
 	const LIVE_CHECK_WINDOW = 10;
 	const LIVE_CHECK_MAX_MISSES = 3;
+	// Utility upgrades help without raising CpS (golden cookies, reindeer, wrinklers, prices, drops), so
+	// they have no payback period. These three only add income while the game is closed, and only with
+	// the heavenly upgrade that turns offline income on.
+	const OFFLINE_UPGRADES = ['Fern tea', 'Ichor syrup', 'Fortune #102'];
+	const OFFLINE_UNLOCK = 'Twin Gates of Transcendence';
+	// A price the game works out from current CpS never gets cheaper by waiting, so it has its own limit.
+	const CPS_PRICED = /cookiesPs|unbuffedCps/;
 	// Fast buying: while the best items pay for themselves in under this many seconds, the order they are
 	// bought in hardly matters, so auto-buy takes several of them at once.
 	const FAST_PP_SECONDS = 1;
@@ -169,6 +176,8 @@
 	const INT_SETTINGS = {
 		clickRate: [0, MAX_CLICK_RATE],
 		autoReserveMinutes: [0, MAX_AUTO_RESERVE_MINUTES],
+		utilityMinutes: [0, MAX_DRAGON_TRAIN_MINUTES],
+		utilityCpsMinutes: [0, MAX_DRAGON_TRAIN_MINUTES],
 		keepLumps: [0, MAX_KEEP_LUMPS],
 		dragonTrainMinutes: [0, MAX_DRAGON_TRAIN_MINUTES],
 		marketBuyPercent: [1, 100],
@@ -178,6 +187,12 @@
 	};
 	const REINCARNATE_GRACE_MS = 3000;
 	const STATUS_REFRESH_MS = 500;
+	// The store ratings' colors. Skipped is a stripe pattern, not a color, and can't be changed.
+	const DEFAULT_COLORS = { best: '#ffd84a', close: '#56e0d0', average: '#8fb8ff', poor: '#c79bff', none: '#8a8a8a', utility: '#7be07b', research: '#f4efe0' };
+	// A picked color darker than this gets a white outline on price text, since a black one would hide it.
+	const DARK_COLOR_LUMINANCE = 0.3;
+	// The line under the news ticker that says what auto-buy is doing changes this often at most.
+	const BUY_LINE_REFRESH_MS = 1000;
 	// What an exported settings text starts with.
 	const EXPORT_PREFIX = 'AFKB1:';
 	// Below this width the panel's dashboard stacks its columns.
@@ -191,6 +206,7 @@
 		clickWrath: 'Include wrath cookies', clickReindeer: 'Reindeer', wrinklerMode: 'Wrinklers', clickFortunes: 'Fortune tickers',
 		fortuneMode: 'Fortune clicks', autoBuy: 'Auto-buy', muteBuySounds: 'Mute auto-buy purchase sounds', reserveMode: 'Cookie reserve',
 		autoReserveMinutes: 'Auto reserve: minutes without a reserve', buyResearch: 'Buy research', elderPledge: 'Elder Pledge',
+		buyUtility: 'Buy no-payback upgrades when cheap', overlayColors: 'Store rating colors', ratingBar: 'Rating counts above the upgrades', showBuyLine: 'Show what auto-buy is doing', utilityMinutes: 'No-payback upgrades: limit, minutes of CpS', utilityCpsMinutes: 'No-payback upgrades priced in CpS: limit, minutes of CpS',
 		storeOverlay: 'Show ratings in the store', autoHarvestLumps: 'Auto-harvest sugar lumps', autoSpendLumps: 'Auto-spend sugar lumps',
 		keepLumps: 'Lumps to keep', lumpPriority: 'Sugar lump priority list', autoTrainDragon: 'Auto-train dragon',
 		dragonTrainMinutes: 'Dragon training limit, minutes of CpS', dragonAura1: 'Primary aura', dragonAura2: 'Secondary aura',
@@ -215,6 +231,11 @@
 		autoReserveMinutes: 30,
 		buyResearch: true,
 		elderPledge: false,
+		buyUtility: true,
+		ratingBar: true,
+		showBuyLine: true,
+		utilityMinutes: 5,
+		utilityCpsMinutes: 180,
 		autoHarvestLumps: true,
 		autoSpendLumps: false,
 		keepLumps: 0,
@@ -301,12 +322,23 @@
 		return basis;
 	}
 
+	// The player's own rating colors: { rating: '#rrggbb' } for the ratings that were changed.
+	function sanitizeColors(raw) {
+		const colors = {};
+		if (!raw || typeof raw !== 'object') return colors;
+		for (const rating in DEFAULT_COLORS) {
+			if (typeof raw[rating] === 'string' && /^#[0-9a-f]{6}$/i.test(raw[rating]) && raw[rating].toLowerCase() !== DEFAULT_COLORS[rating]) colors[rating] = raw[rating].toLowerCase();
+		}
+		return colors;
+	}
+
 	function sanitizeSettings(raw) {
 		const settings = Object.assign({}, DEFAULTS);
 		settings.lumpPriority = sanitizeLumpPriority(raw && raw.lumpPriority);
 		settings.marketBasis = sanitizeMarketBasis(raw && raw.marketBasis);
 		// null until the player chooses: on, unless Cookie Monster is drawing its own store colors.
 		settings.storeOverlay = raw && typeof raw.storeOverlay === 'boolean' ? raw.storeOverlay : null;
+		settings.overlayColors = sanitizeColors(raw && raw.overlayColors);
 		if (!raw || typeof raw !== 'object') return settings;
 
 		for (const key in DEFAULTS) {
@@ -340,6 +372,10 @@
 		// Set after a purchase: buy again as soon as the payback data is ready, not a second later.
 		buyAgain: false,
 		recalcWaitSince: 0,
+		// What the PP buyer is saving for, for the line under the news ticker: { label, cost }, or null.
+		buyTarget: null,
+		lastBought: '',
+		nextBuyLineAt: 0,
 		// Set while fast buying is at work: the store ratings are refreshed less often until then.
 		fastBuyingUntil: 0,
 		skipUntil: {}, // candidate key -> { until, reason }
@@ -460,6 +496,7 @@
 			installStyles();
 			installMenuHook();
 			ensurePanel();
+			applyColors();
 			installClickSoundHook();
 			console.log(`${LOG_PREFIX} v${VERSION} loaded.`);
 		},
@@ -474,6 +511,7 @@
 				debugLog('Bad save data, using defaults.', e);
 			}
 			mod.settings = sanitizeSettings(parsed);
+			applyColors();
 			state.ascendWarning = false;
 			state.needsLoadCheck = true;
 			renderMenuSection();
@@ -1570,6 +1608,81 @@
 		return candidate.price + candidate.amount - 1;
 	}
 
+	/* ----- Utility upgrades: no payback period, bought when cheap ----- */
+
+	function isCpsPriced(upgrade) {
+		return typeof upgrade.priceFunc === 'function' && CPS_PRICED.test(String(upgrade.priceFunc));
+	}
+
+	// The most a utility upgrade may cost, in minutes of unbuffed CpS.
+	function utilityLimitMinutes(upgrade) {
+		return isCpsPriced(upgrade) ? settings().utilityCpsMinutes : settings().utilityMinutes;
+	}
+
+	// What the utility rule makes of an upgrade in the store:
+	//   null                      it isn't a utility upgrade (it has a payback period, or is never bought)
+	//   { skip: 'why' }           it has no payback period, and the rule leaves it alone
+	//   { price, limit, cheap }   it is bought once it is cheap: under limit minutes of unbuffed CpS
+	function utilityStatus(upgrade) {
+		const s = settings();
+		if (!s.buyUtility || upgrade.pool === 'tech' || upgradeFilterReason(upgrade)) return null;
+		const outcome = calc.results.get(candidateKey({ kind: 'upgrade', name: upgrade.name, amount: 1 }));
+		if (!outcome || outcome.gain !== 0) return null;
+		// A CpS upgrade for a building of which none is owned: it will have a payback period once there is one.
+		if (unownedBuildingNote(upgrade)) return null;
+		if (outcome.clickGain > 0) {
+			// With the autoclicker on it has a click payback period and is ranked with everything else.
+			return effectiveClickRate() > 0 ? null : { skip: 'it only raises click income, and the autoclicker is off' };
+		}
+		if (OFFLINE_UPGRADES.indexOf(upgrade.name) !== -1 && !Game.Has(OFFLINE_UNLOCK)) {
+			return { skip: `it only adds income while the game is closed, and you don't own ${OFFLINE_UNLOCK}` };
+		}
+		// Auto-pet buys these two itself as soon as they are affordable.
+		if (s.autoPetDragon && DRAGON_DROPS_WITHOUT_PP.indexOf(upgrade.name) !== -1) return { skip: '', byAutoPet: true };
+		const price = upgrade.getPrice();
+		const limit = utilityLimitMinutes(upgrade);
+		const cps = calc.base ? calc.base.immediate : 0;
+		// The tiny allowance is for prices that are exactly a number of minutes of CpS.
+		return { price: price, limit: limit, cpsPriced: isCpsPriced(upgrade), cheap: price <= limit * 60 * cps * (1 + 1e-9) };
+	}
+
+	// The utility upgrade to buy in this pass, or null. At most one per pass, the cheapest first, and
+	// never at the PP buyer's expense: only if the PP target stays affordable, or is still further away
+	// than the upgrade's own limit (so it is delayed by less than it was going to take anyway).
+	function nextUtilityPurchase(ppTarget, now) {
+		if (!settings().buyUtility) return null;
+		const spare = Game.cookies - reserveAmount();
+		const cps = calc.base ? calc.base.immediate : 0;
+		const targetCost = ppTarget ? purchaseCost(ppTarget) : 0;
+		let best = null;
+		for (const upgrade of Game.UpgradesInStore) {
+			const status = utilityStatus(upgrade);
+			if (!status || !status.cheap || status.price > spare) continue;
+			const candidate = { kind: 'upgrade', name: upgrade.name, amount: 1, price: status.price, limit: status.limit };
+			if (unbuyableReason(candidate, now)) continue;
+			if (ppTarget) {
+				const stillAffordable = spare - status.price >= targetCost;
+				const waitSeconds = cps > 0 ? Math.max(targetCost - spare, 0) / cps : Infinity;
+				if (!stillAffordable && !(waitSeconds > status.limit * 60)) continue;
+			}
+			if (!best || candidate.price < best.price) best = candidate;
+		}
+		return best;
+	}
+
+	function buyUtility(candidate, now) {
+		predictPurchase([candidate], candidate.name);
+		const bought = tryBuyUpgrade(Game.Upgrades[candidate.name]);
+		if (!bought) {
+			calc.pendingCheck = null;
+			skipCandidate(candidate, now, 'buying it failed');
+			return false;
+		}
+		state.lastBought = candidate.name;
+		state.buyStatus = `Bought ${candidate.name} (no payback period; bought because it costs under ${candidate.limit} min of CpS).`;
+		return true;
+	}
+
 	// Fast buying. Right after an ascension hundreds of items pay for themselves in a fraction of a
 	// second, and which of them comes first hardly matters. So while the best item's payback period
 	// is under FAST_PP_SECONDS, everything else under it that the bank can cover is bought in the same
@@ -1648,7 +1761,14 @@
 
 		let outcome = '';
 		let bought = false;
-		const batch = chosen ? fastBatch(candidates, now) : [];
+		if (!chosen) state.buyTarget = null;
+		const utility = nextUtilityPurchase(chosen, now);
+		const batch = chosen && !utility ? fastBatch(candidates, now) : [];
+		if (utility && buyUtility(utility, now)) {
+			// One utility upgrade, then the PP buyer carries on in the next pass with fresh numbers.
+			dumpCandidates(candidates, null, '', skipped, report);
+			return true;
+		}
 		if (batch.length > 1) {
 			bought = buyFastBatch(batch, now);
 			outcome = bought ? `bought in a fast batch of ${batch.length}` : 'fast batch failed';
@@ -1671,6 +1791,7 @@
 		const reserve = reserveAmount();
 		const cost = purchaseCost(candidate);
 		const shortfall = cost + reserve - Game.cookies;
+		state.buyTarget = shortfall > 0 ? { label: label, cost: cost } : null;
 		if (shortfall > 0) {
 			if (Game.cookies >= cost) {
 				state.buyStatus = `Waiting on reserve: ${label} (${Beautify(candidate.price)}) is affordable, ` +
@@ -1696,6 +1817,7 @@
 			state.buyStatus = `Couldn't buy ${label}, skipping it for now.`;
 			return { outcome: 'buying it failed', bought: false };
 		}
+		state.lastBought = label;
 		state.buyStatus = `Bought ${label} (${candidate.tag ? candidate.tag + ' ' : ''}PP ${ppText(candidate.pp)}).`;
 		return { outcome: 'bought', bought: true };
 	}
@@ -1733,6 +1855,8 @@
 		const s = settings();
 		if (!s.autoBuy) {
 			state.buyStatus = 'Off.';
+			state.buyTarget = null;
+			state.lastBought = '';
 			// Turning auto-buy off and on again is how the player resumes after the purchase checks paused it.
 			calc.paused = '';
 			calc.recentChecks = [];
@@ -2652,10 +2776,11 @@
 		average: { label: 'Average', legend: `up to ${AVERAGE_RATIO} times the best` },
 		poor: { label: 'Poor', legend: `more than ${AVERAGE_RATIO} times the best` },
 		none: { label: 'No payback period', legend: "the purchase doesn't raise your income, so it never pays for itself" },
+		utility: { label: 'Utility: bought when cheap', legend: 'no payback period, but useful (golden cookies, reindeer, wrinklers, prices, drops): bought once it costs less than the limit set above' },
 		research: { label: 'Bought by the research setting', legend: 'research, bought as soon as it is affordable while Buy research is on' },
 		skip: { label: 'Skipped by AFK Baker', legend: 'never bought: switches, vaulted upgrades, the never-buy list, and research while Buy research is off' },
 	};
-	const RATING_ORDER = ['best', 'close', 'average', 'poor', 'none', 'research', 'skip'];
+	const RATING_ORDER = ['best', 'close', 'average', 'poor', 'utility', 'none', 'research', 'skip'];
 	const SKIP_REASONS = {
 		'toggle pool': 'it is a switch, not a purchase',
 		'never-buy list': 'it is on the never-buy list',
@@ -2674,6 +2799,68 @@
 		nextRatingAt: 0,
 		watching: false,
 	};
+
+	function ratingColor(rating) {
+		return settings().overlayColors[rating] || DEFAULT_COLORS[rating];
+	}
+
+	// Whether a '#rrggbb' color is dark enough that a black outline would hide it.
+	function isDarkColor(hex) {
+		const r = parseInt(hex.slice(1, 3), 16);
+		const g = parseInt(hex.slice(3, 5), 16);
+		const b = parseInt(hex.slice(5, 7), 16);
+		return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < DARK_COLOR_LUMINANCE;
+	}
+
+	// The colors are CSS variables on the page, read by every mark and price; an unset one means the default.
+	function applyColors() {
+		const root = document.documentElement;
+		const colors = settings().overlayColors;
+		for (const rating in DEFAULT_COLORS) {
+			if (colors[rating]) root.style.setProperty('--afk-' + rating, colors[rating]);
+			else root.style.removeProperty('--afk-' + rating);
+			// Price text is outlined so it reads on the building rows: in black, or in white for a dark color.
+			if (colors[rating] && isDarkColor(colors[rating])) root.style.setProperty('--afk-' + rating + '-edge', '#fff');
+			else root.style.removeProperty('--afk-' + rating + '-edge');
+		}
+	}
+
+	// A small bar just above the upgrades: how many of them have each rating.
+	function updateRatingBar() {
+		const upgrades = document.getElementById('upgrades');
+		if (!upgrades || !upgrades.parentNode) return;
+		let bar = document.getElementById('afkRatingBar');
+		const show = isOverlayOn() && settings().ratingBar;
+		if (!show) {
+			if (bar) bar.remove();
+			return;
+		}
+		const counts = {};
+		for (const id of UPGRADE_BOXES) {
+			const box = document.getElementById(id);
+			if (!box) continue;
+			const crates = box.getElementsByClassName('upgrade');
+			for (let i = 0; i < crates.length; i++) {
+				const rating = crates[i].dataset.afkRating;
+				if (rating) counts[rating] = (counts[rating] || 0) + 1;
+			}
+		}
+		const html = RATING_ORDER.filter(function (rating) { return counts[rating]; }).map(function (rating) {
+			const tip = `<div style="padding:8px;white-space:nowrap;font-size:11px;"><b>${RATINGS[rating].label}</b>: ${counts[rating]} upgrade${counts[rating] === 1 ? '' : 's'} in the store</div>`;
+			return `<span class="afk-count" data-afk-count="${rating}" ${Game.getTooltip(tip, 'store')}><span class="afk-mark" data-afk-rating="${rating}"></span>${counts[rating]}</span>`;
+		}).join('');
+		if (!bar) {
+			bar = document.createElement('div');
+			bar.id = 'afkRatingBar';
+		}
+		// Kept directly above the upgrades, whatever else (another mod's bar) is put there.
+		if (bar.nextSibling !== upgrades) upgrades.parentNode.insertBefore(bar, upgrades);
+		if (bar.dataset.afkHtml !== html) {
+			bar.dataset.afkHtml = html;
+			bar.innerHTML = html;
+		}
+		bar.style.display = html ? '' : 'none';
+	}
 
 	function isMonsterLoaded() {
 		return !!window.CookieMonsterData;
@@ -2743,7 +2930,10 @@
 				if (unowned) why = `${unowned}, so for now it adds nothing`;
 				if (outcome.gain < 0) why = 'it lowers your CpS';
 				else if (outcome.clickGain > 0 && clickRate <= 0) why = 'it only raises click income, and the autoclicker is off';
-				ratings.set(key, { rating: 'none', why: why });
+				const utility = utilityStatus(upgrade);
+				if (utility && utility.byAutoPet) ratings.set(key, { rating: 'utility', why: 'auto-pet buys it as soon as it is affordable' });
+				else if (utility && !utility.skip) ratings.set(key, { rating: 'utility', utility: utility });
+				else ratings.set(key, { rating: 'none', why: utility && utility.skip ? utility.skip : why });
 			}
 		}
 		for (const name in Game.Objects) {
@@ -2794,6 +2984,7 @@
 			const entry = bulk ? overlay.ratings.get(candidateKey({ kind: 'building', name: building.name, amount: bulk })) : null;
 			setRating(document.getElementById('product' + building.id), entry ? entry.rating : '');
 		}
+		updateRatingBar();
 	}
 
 	// A payback period or a wait, in the two largest units that matter.
@@ -2831,6 +3022,17 @@
 		if (entry.pp !== undefined) {
 			rows += tipRow('Payback period', shortTime(entry.pp) + (entry.tag === 'click' ? ` (click upgrade, at ${effectiveClickRate().toFixed(1)} clicks per second)` : '')) +
 				tipRow('Rank', `${entry.rank} of ${overlay.ranked}`);
+		}
+		if (entry.utility) {
+			const u = entry.utility;
+			const cps = calc.base ? calc.base.immediate : 0;
+			const minutes = cps > 0 ? u.price / cps / 60 : Infinity;
+			const costText = minutes < 0.1 ? 'under 0.1 min' : `${minutes < 10 ? minutes.toFixed(1) : Beautify(Math.round(minutes))} min`;
+			rows += tipRow('Why', "It doesn't raise CpS, so it has no payback period, but it is useful") +
+				tipRow('Bought when', `it costs ${u.limit} min of CpS or less${u.cpsPriced ? ' (its price follows your CpS)' : ''}`) +
+				tipRow('Costs now', `${costText} of CpS`) +
+				tipRow('So', u.cheap ? (u.price <= Game.cookies - reserveAmount() ? 'it is bought next, unless that would hold up the current target' : 'it is bought once you can afford it') :
+					(u.cpsPriced ? 'not at this limit: raise the limit on the Auto-buy tab to have it bought' : 'it is bought once your CpS has grown enough'));
 		}
 		if (entry.why) rows += tipRow('Why', escapeHtml(capitalize(entry.why)));
 		return rows;
@@ -3051,29 +3253,42 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 #afkPanel.afk-panel-narrow .afk-dash-nothing,#afkPanel.afk-panel-narrow .afk-dash-head{display:none;}
 #afkPanel .afk-hint{display:inline-block;width:15px;height:15px;line-height:14px;text-align:center;border-radius:50%;border:1px solid #888;color:#aaa;font-size:10px;cursor:help;margin:0px 4px 0px 2px;}
 #afkPanel .afk-hint:hover{color:#fff;border-color:#fff;}
-#afkPanel .afk-legend{display:grid;grid-template-columns:16px minmax(90px,max-content) minmax(0,1fr);grid-gap:5px 8px;align-items:baseline;padding:4px 16px;}
+#afkPanel .afk-legend{display:grid;grid-template-columns:16px minmax(90px,max-content) 28px minmax(0,1fr);grid-gap:5px 8px;align-items:baseline;padding:4px 16px;}
 #afkPanel .afk-legend b{color:#fff;font-weight:normal;opacity:1;}
-#afkPanel.afk-panel-narrow .afk-legend{grid-template-columns:16px minmax(0,1fr);}
-#afkPanel.afk-panel-narrow .afk-legend span:nth-child(3n){grid-column:2;opacity:0.7;}
+#afkPanel.afk-panel-narrow .afk-legend{grid-template-columns:16px minmax(0,1fr) 28px;}
+#afkPanel.afk-panel-narrow .afk-legend span:nth-child(4n){grid-column:2 / span 2;opacity:0.7;}
 #afkPanel .afk-changes{margin:4px 0px 2px;padding:6px 8px;border:1px solid rgba(255,255,255,0.2);border-radius:3px;line-height:1.5;max-height:180px;overflow-y:auto;}
 #afkPanel textarea{resize:vertical;}
 #afkBakerOptionsLine a.option{margin-left:8px;}
 .afk-mark{display:inline-block;width:10px;height:10px;border:1px solid #000;box-shadow:0px 0px 0px 1px rgba(255,255,255,0.6);vertical-align:-1px;}
-.afk-mark[data-afk-rating="best"],.crate.upgrade[data-afk-rating="best"]:after,.product[data-afk-rating="best"] .price:after{background:#ffd84a;box-shadow:0px 0px 0px 1px #fff,0px 0px 6px #ffd84a;}
-.afk-mark[data-afk-rating="close"],.crate.upgrade[data-afk-rating="close"]:after,.product[data-afk-rating="close"] .price:after{background:#56e0d0;}
-.afk-mark[data-afk-rating="average"],.crate.upgrade[data-afk-rating="average"]:after,.product[data-afk-rating="average"] .price:after{background:#8fb8ff;}
-.afk-mark[data-afk-rating="poor"],.crate.upgrade[data-afk-rating="poor"]:after,.product[data-afk-rating="poor"] .price:after{background:#c79bff;}
-.afk-mark[data-afk-rating="none"],.crate.upgrade[data-afk-rating="none"]:after,.product[data-afk-rating="none"] .price:after{background:#8a8a8a;}
-.afk-mark[data-afk-rating="research"],.crate.upgrade[data-afk-rating="research"]:after{background:radial-gradient(circle,#111 0px,#111 2px,#f4efe0 3px);}
+.afk-mark[data-afk-rating="best"],.crate.upgrade[data-afk-rating="best"]:after,.product[data-afk-rating="best"] .price:after{background:var(--afk-best,#ffd84a);box-shadow:0px 0px 0px 1px #fff,0px 0px 6px var(--afk-best,#ffd84a);}
+.afk-mark[data-afk-rating="close"],.crate.upgrade[data-afk-rating="close"]:after,.product[data-afk-rating="close"] .price:after{background:var(--afk-close,#56e0d0);}
+.afk-mark[data-afk-rating="average"],.crate.upgrade[data-afk-rating="average"]:after,.product[data-afk-rating="average"] .price:after{background:var(--afk-average,#8fb8ff);}
+.afk-mark[data-afk-rating="poor"],.crate.upgrade[data-afk-rating="poor"]:after,.product[data-afk-rating="poor"] .price:after{background:var(--afk-poor,#c79bff);}
+.afk-mark[data-afk-rating="none"],.crate.upgrade[data-afk-rating="none"]:after,.product[data-afk-rating="none"] .price:after{background:var(--afk-none,#8a8a8a);}
+.afk-mark[data-afk-rating="utility"],.crate.upgrade[data-afk-rating="utility"]:after{background:linear-gradient(var(--afk-utility,#7be07b),var(--afk-utility,#7be07b)) center/2px 100% no-repeat,linear-gradient(var(--afk-utility,#7be07b),var(--afk-utility,#7be07b)) center/100% 2px no-repeat,#163016;}
+.afk-mark[data-afk-rating="research"],.crate.upgrade[data-afk-rating="research"]:after{background:radial-gradient(circle,#111 0px,#111 2px,var(--afk-research,#f4efe0) 3px);}
 .afk-mark[data-afk-rating="skip"],.crate.upgrade[data-afk-rating="skip"]:after{background:repeating-linear-gradient(135deg,#111 0px,#111 2px,#e9e9e9 2px,#e9e9e9 4px);}
 .crate.upgrade[data-afk-rating]:after{content:'';position:absolute;left:-1px;top:-1px;width:10px;height:10px;border:1px solid #000;box-shadow:0px 0px 0px 1px rgba(255,255,255,0.6);z-index:20;pointer-events:none;}
 .product[data-afk-rating] .price:after{content:'';display:inline-block;width:8px;height:8px;margin-left:6px;border:1px solid #000;box-shadow:0px 0px 0px 1px rgba(255,255,255,0.6);}
-.product[data-afk-rating] .price{text-shadow:-1px 0px 0px #000,1px 0px 0px #000,0px -1px 0px #000,0px 1px 0px #000,0px 0px 4px #000,0px 2px 4px #000;}
-.product[data-afk-rating="best"] .price{color:#ffd84a !important;}
-.product[data-afk-rating="close"] .price{color:#56e0d0 !important;}
-.product[data-afk-rating="average"] .price{color:#8fb8ff !important;}
-.product[data-afk-rating="poor"] .price{color:#c79bff !important;}
-.product[data-afk-rating="none"] .price{color:#d0d0d0 !important;}
+.product[data-afk-rating="best"] .price{text-shadow:-1px 0px 0px var(--afk-best-edge,#000),1px 0px 0px var(--afk-best-edge,#000),0px -1px 0px var(--afk-best-edge,#000),0px 1px 0px var(--afk-best-edge,#000),0px 0px 4px var(--afk-best-edge,#000),0px 2px 4px #000;}
+.product[data-afk-rating="close"] .price{text-shadow:-1px 0px 0px var(--afk-close-edge,#000),1px 0px 0px var(--afk-close-edge,#000),0px -1px 0px var(--afk-close-edge,#000),0px 1px 0px var(--afk-close-edge,#000),0px 0px 4px var(--afk-close-edge,#000),0px 2px 4px #000;}
+.product[data-afk-rating="average"] .price{text-shadow:-1px 0px 0px var(--afk-average-edge,#000),1px 0px 0px var(--afk-average-edge,#000),0px -1px 0px var(--afk-average-edge,#000),0px 1px 0px var(--afk-average-edge,#000),0px 0px 4px var(--afk-average-edge,#000),0px 2px 4px #000;}
+.product[data-afk-rating="poor"] .price{text-shadow:-1px 0px 0px var(--afk-poor-edge,#000),1px 0px 0px var(--afk-poor-edge,#000),0px -1px 0px var(--afk-poor-edge,#000),0px 1px 0px var(--afk-poor-edge,#000),0px 0px 4px var(--afk-poor-edge,#000),0px 2px 4px #000;}
+.product[data-afk-rating="none"] .price{text-shadow:-1px 0px 0px var(--afk-none-edge,#000),1px 0px 0px var(--afk-none-edge,#000),0px -1px 0px var(--afk-none-edge,#000),0px 1px 0px var(--afk-none-edge,#000),0px 0px 4px var(--afk-none-edge,#000),0px 2px 4px #000;}
+.product[data-afk-rating="best"] .price{color:var(--afk-best,#ffd84a) !important;}
+.product[data-afk-rating="close"] .price{color:var(--afk-close,#56e0d0) !important;}
+.product[data-afk-rating="average"] .price{color:var(--afk-average,#8fb8ff) !important;}
+.product[data-afk-rating="poor"] .price{color:var(--afk-poor,#c79bff) !important;}
+.product[data-afk-rating="none"] .price{color:var(--afk-none,#d0d0d0) !important;}
+#afkRatingBar{display:flex;flex-wrap:wrap;align-items:center;padding:3px 8px;background:rgba(0,0,0,0.55);font-size:11px;line-height:14px;color:#ddd;text-shadow:0px 1px 1px #000;position:relative;z-index:1;}
+#afkRatingBar .afk-count{display:inline-flex;align-items:center;margin-right:10px;cursor:default;}
+#afkRatingBar .afk-count .afk-mark{margin-right:4px;}
+#afkOpen{max-width:calc(100% - 150px);overflow:hidden;text-overflow:ellipsis;}
+#afkBuyLine{margin-left:8px;padding-left:8px;border-left:1px solid #666;font-family:Tahoma,Arial,sans-serif;font-size:10px;color:#ddd;}
+#afkBuyLine:hover{color:#fff;text-decoration:underline;}
+#afkBuyLine:empty{display:none;}
+#afkPanel input.afk-color{width:26px;height:16px;padding:0px;margin:0px;border:1px solid #777;background:#000;cursor:pointer;vertical-align:middle;}
 #tooltip .afk-tip{margin:0px 8px 8px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.2);font-size:11px;text-align:left;position:relative;}
 #tooltip .afk-tip-who{font-size:9px;text-transform:uppercase;letter-spacing:0.5px;opacity:0.55;}
 #tooltip .afk-tip-rating{font-size:13px;color:#fff;margin:2px 0px;}
@@ -3505,9 +3720,12 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			listing(toggleButton('clickFortunes', 'Fortune tickers') + (s.clickFortunes ? cycleButton('fortuneMode', 'Click') : ''));
 	}
 
+	// The legend, with a color picker for every rating that has a color. Skipped is a pattern.
 	function legendHtml() {
 		const rows = RATING_ORDER.map(function (rating) {
-			return `<span class="afk-mark" data-afk-rating="${rating}"></span><b>${RATINGS[rating].label}</b><span>${RATINGS[rating].legend}</span>`;
+			const picker = hasKey(DEFAULT_COLORS, rating) ?
+				`<span><input type="color" class="afk-color" data-afk-color="${rating}" value="${ratingColor(rating)}" title="Color for ${RATINGS[rating].label}"></span>` : '<span></span>';
+			return `<span class="afk-mark" data-afk-rating="${rating}"></span><b>${RATINGS[rating].label}</b>${picker}<span>${RATINGS[rating].legend}</span>`;
 		});
 		return `<div class="afk-legend">${rows.join('')}</div>`;
 	}
@@ -3516,10 +3734,21 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		const s = settings();
 		let html = listing(toggleButton('autoBuy', 'Auto-buy') +
 			hint('Buys the upgrade or building (1, 10 or 100 at once) with the lowest payback period, and saves up for it rather than buying something worse. With the autoclicker on, click upgrades such as the mouse upgrades are ranked by the click income they add.'));
+		html += listing(toggleButton('showBuyLine', 'Show what auto-buy is doing under the news ticker') +
+			hint('A short line next to the AFK Baker tab, such as "Saving for 10x Fractal engine (2h 41m)", "Fast buying", "Paused" or "Auto-buy off". It changes at most once a second. Click it to open this tab.'));
 		if (s.autoBuy) {
 			html += listing(toggleButton('buyResearch', 'Buy research') + hint('Research upgrades advance the grandmapocalypse.')) +
 				listing(toggleButton('elderPledge', 'Elder Pledge') +
 					hint('Pledging stops wrinklers from spawning. Never pledges in Feed mode or while a shiny wrinkler is on screen.'));
+		}
+		if (s.autoBuy) {
+			html += listing(toggleButton('buyUtility', 'Buy no-payback upgrades') +
+				(s.buyUtility ? `<label>when they cost less than</label> ${numberInput('utilityMinutes', 50)}<label>minutes of CpS</label>` : '') +
+				hint('Some upgrades help without raising CpS, so they have no payback period: golden cookie, reindeer and wrinkler upgrades, cheaper prices, more drops. They are bought once they cost less than this many minutes of unbuffed CpS, at most one each pass, respecting the cookie reserve, and never when that would hold up what auto-buy is saving for. Click upgrades are left out while the autoclicker is off, and offline-income upgrades unless you own Twin Gates of Transcendence.'));
+			if (s.buyUtility) {
+				html += listing(`<label>Ones priced in CpS: when they cost less than</label> ${numberInput('utilityCpsMinutes', 50)}<label>minutes of CpS</label>` +
+					hint('A few are priced by the game as a share of your CpS, so they never get cheaper by waiting: Green yeast digestives (180 minutes), Ichor syrup (120), Fern tea (60), the dragon drops (30, or 3 with a fully trained dragon), and Fortune #102 (a day, until your CpS is very high). They have their own, higher limit. Set it to 0 to never buy them.'));
+			}
 		}
 		html += listing(cycleButton('reserveMode', 'Cookie reserve') +
 			hint('How many cookies always stay banked. Auto-buy, dragon training and the stock market all respect it. Off by default. Lucky keeps 6,000x unbuffed CpS, Lucky + Frenzy 42,000x: the bank sizes a full Lucky payout needs. Auto keeps nothing early in a run, then switches to Lucky.'));
@@ -3535,7 +3764,11 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 				hint("Marks each upgrade's corner and colors each building's price by how its payback period compares with the best one, and adds the numbers to the game's tooltips. It reads the numbers auto-buy works out and runs no calculations of its own." +
 					(monster ? ' Cookie Monster is loaded and draws its own colors in the store, so this starts switched off to avoid two sets of squares. Turning it on here is remembered.' : ''))) +
 			(monster && s.storeOverlay === null ? listing('<label>Off because Cookie Monster is loaded and draws its own colors in the store. You can turn this on anyway.</label>') : '') +
+			(isOverlayOn() ? listing(toggleButton('ratingBar', 'Rating counts above the upgrades') +
+				hint('A small bar just above the upgrades in the store: a mark and a number for each rating, in your colors. Hover a number for the rating\'s name.')) : '') +
 			legendHtml() +
+			listing(actionButton('colors-reset', 'Reset to default colors') +
+				hint('Click a color to change it. It applies to the upgrade squares, the building prices and the count bar. Price text is outlined so it stays readable on the building rows whatever you pick: in black, or in white if you pick a dark color. Skipped keeps its stripes, and every tooltip still names the rating in words.')) +
 			listing('<label>Every rating is also written out in the tooltip, so it doesn\'t depend on telling the colors apart. A building\'s price shows the rating for the amount the store is set to buy (1, 10 or 100).</label>');
 		return html;
 	}
@@ -3872,6 +4105,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		if (typeof value === 'boolean') return value ? 'ON' : 'OFF';
 		if (value === null) return 'automatic';
 		if (hasKey(CYCLE_OPTIONS, key)) return CYCLE_OPTIONS[key][value];
+		if (key === 'overlayColors') return Object.keys(value).length ? Object.keys(value).map(function (rating) { return `${RATINGS[rating].label} ${value[rating]}`; }).join(', ') : 'default';
 		if (key === 'lumpPriority') return value.length ? value.map(function (entry) { return `${entry.building} to ${entry.level}`; }).join(', ') : 'empty';
 		if (value === '') return 'none';
 		return typeof value === 'number' ? Beautify(value) : String(value);
@@ -3908,6 +4142,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		const draft = state.importDraft;
 		if (!draft.preview) return;
 		mod.settings = draft.preview.settings;
+		applyColors();
 		state.importDraft = { text: '', preview: null, error: '' };
 		state.ascendWarning = false;
 		recheckAscendWarning();
@@ -3954,9 +4189,14 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 
 		const open = document.createElement('div');
 		open.id = 'afkOpen';
-		open.innerHTML = '<span class="afk-dot afk-dot-on" id="afkOpenDot"></span>AFK Baker';
-		open.addEventListener('click', function () {
+		open.innerHTML = '<span class="afk-dot afk-dot-on" id="afkOpenDot"></span>AFK Baker<span id="afkBuyLine"></span>';
+		open.addEventListener('click', function (event) {
 			PlaySound('snd/tick.mp3');
+			// The line that says what auto-buy is doing opens its tab.
+			if (event.target.closest('#afkBuyLine')) {
+				openPanel('autobuy');
+				return;
+			}
 			if (state.panelOpen) closePanel();
 			else openPanel();
 		});
@@ -4098,6 +4338,9 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			else if (action === 'overlay') {
 				s.storeOverlay = !isOverlayOn();
 				applyOverlay();
+			} else if (action === 'colors-reset') {
+				s.overlayColors = {};
+				applyColors();
 			} else if (action === 'export-copy') copyExport();
 			else if (action === 'import-check') checkImport();
 			else if (action === 'import-apply') applyImport();
@@ -4150,6 +4393,13 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		const dataset = event.target.dataset || {};
 		if (dataset.afkLumpField) state.lumpDraft[dataset.afkLumpField] = event.target.value;
 		if (dataset.afkImport !== undefined) state.importDraft.text = event.target.value;
+		if (dataset.afkColor && hasKey(DEFAULT_COLORS, dataset.afkColor) && /^#[0-9a-f]{6}$/i.test(event.target.value)) {
+			// Applied as the picker moves; the panel isn't redrawn, so the picker stays open.
+			const colors = Object.assign({}, settings().overlayColors);
+			colors[dataset.afkColor] = event.target.value;
+			settings().overlayColors = sanitizeColors(colors);
+			applyColors();
+		}
 		if (dataset.afkLumpTarget !== undefined && /^\d+$/.test(event.target.value.trim())) {
 			const entry = lumpTargetEntry(event.target);
 			const level = clampInt(event.target.value, 1, MAX_TARGET_LEVEL, 1);
@@ -4184,6 +4434,10 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 
 	function onMenuChange(event) {
 		const input = event.target;
+		if (input.dataset && input.dataset.afkColor) {
+			onMenuInput(event);
+			return;
+		}
 		if (input.dataset && input.dataset.afkLumpField) {
 			onMenuInput(event);
 			return;
@@ -4420,6 +4674,38 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		if (wasActive) renderMenuSection();
 	}
 
+	// What auto-buy is doing, in a few words, for the line next to the panel's tab.
+	function buyLineText() {
+		const s = settings();
+		if (state.paused) return 'Paused';
+		if (!s.autoBuy) return 'Auto-buy off';
+		if (calc.paused || (calc.blocked && calc.fileSource !== null)) return 'Paused: safety check';
+		if (Date.now() < state.fastBuyingUntil) return 'Fast buying';
+		const target = state.buyTarget;
+		if (target) {
+			const shortfall = target.cost + reserveAmount() - Game.cookies;
+			const cps = Game.unbuffedCps;
+			if (shortfall > 0) return `Saving for ${target.label}` + (cps > 0 ? ` (${shortTime(shortfall / cps)})` : '');
+			return `Buying ${target.label}`;
+		}
+		return state.lastBought ? `Bought ${state.lastBought}` : 'Working out what to buy';
+	}
+
+	function refreshBuyLine(now) {
+		const line = document.getElementById('afkBuyLine');
+		if (!line) return;
+		const show = settings().showBuyLine;
+		if (!show) {
+			if (line.textContent) line.textContent = '';
+			return;
+		}
+		// At most once a second, so it doesn't flicker while purchases come in fast.
+		if (line.textContent && now < state.nextBuyLineAt) return;
+		const text = buyLineText();
+		if (line.textContent !== text) line.textContent = text;
+		state.nextBuyLineAt = now + BUY_LINE_REFRESH_MS;
+	}
+
 	// Twice a second: the store ratings, the dot on the panel's tab, and the open tab's live parts.
 	function refreshStatusLine(now, force) {
 		if (!force && now - state.lastStatusRefresh < STATUS_REFRESH_MS) return;
@@ -4432,6 +4718,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		const dot = document.getElementById('afkOpenDot');
 		const dotClass = `afk-dot afk-dot-${state.paused ? 'wait' : stopped ? 'warn' : 'on'}`;
 		if (dot.className !== dotClass) dot.className = dotClass;
+		refreshBuyLine(now);
 		if (!state.panelOpen) return;
 
 		placePanel();
