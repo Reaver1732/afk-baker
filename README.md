@@ -1,6 +1,6 @@
 # AFK Baker
 
-A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building (1, 10 or 100 at a time) or upgrade by its own payback-period calculation, harvests and spends sugar lumps, trains Krumblor the dragon, trades on the Stock Market, casts Grimoire spells, and ascends when you reach a prestige goal.
+A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building (1, 10 or 100 at a time) or upgrade by its own payback-period calculation, harvests and spends sugar lumps, trains Krumblor the dragon, trades on the Stock Market, casts Grimoire spells, counts where your cookies come from, and ascends when you reach a prestige goal.
 
 It uses only the game's built-in mod API (`Game.registerMod`). CCSE is not needed.
 
@@ -13,7 +13,7 @@ Every feature can be turned on or off in **AFK Baker's own panel**. Open it with
 - The dot on the tab shows the state at a glance: green running, yellow paused, red when a safety check or an error stopped something.
 - **What auto-buy is doing**, next to the tab, without opening the panel: `Saving for 10x Fractal engine (2h 41m)`, `Bought 1x Cursor`, `Fast buying`, `Paused`, `Paused: safety check` or `Auto-buy off`. The time is how long the missing cookies take at your unbuffed CpS. It changes at most once a second, and clicking it opens the Auto-buy tab. It sits in the strip under the news ticker, so it never covers the news, and is cut short with an ellipsis on a narrow window. It has its own switch on the Auto-buy tab (on by default).
 - **Dashboard**: one row per feature with what it is doing now and what it is waiting for. Click a row to open its tab. Each settings tab shows its own rows at the top.
-- **Tabs**: Clickers, Auto-buy, Sugar lumps, Dragon, Pantheon, Stock Market, Grimoire, Auto-ascend, Extras and Other. Explanations are behind the "?" next to a setting: hover it. A sub-setting is only shown while the setting it belongs to is on.
+- **Tabs**: Clickers, Auto-buy, Sugar lumps, Dragon, Pantheon, Stock Market, Grimoire, Auto-ascend, Stats and Other. Explanations are behind the "?" next to a setting: hover it. A sub-setting is only shown while the setting it belongs to is on.
 - **Pause all** (top of the panel, on every tab): stops everything AFK Baker does without changing any setting. Resume picks up where it left off. The store ratings keep showing. A pause is not remembered when the game restarts, so a forgotten pause can't silently stop an AFK session.
 - **Settings export and import** (Other tab): Copy gives every setting as one line of text. To import, paste a text and press Check import. It lists what would change and changes nothing until you press Apply. The text is checked the same way a saved game's settings are. Auto-ascend is always imported switched off, so a pasted text can't trigger an ascension.
 - The panel is only redrawn when you do something, so a field you are typing in and a drag in progress are never interrupted.
@@ -52,7 +52,7 @@ Every feature can be turned on or off in **AFK Baker's own panel**. Open it with
   - **Utility: bought when cheap** (dark square with a green cross): no payback period, but useful, and bought by the no-payback setting. The tooltip shows the limit, what it costs now in minutes of CpS, and when it will be bought.
   - **No payback period** (gray): the purchase doesn't raise your income, and the no-payback setting leaves it alone or is off. The tooltip says why.
   - **Bought by the research setting** (pale square with a dot): research, while Buy research is on.
-  - **Skipped by AFK Baker** (black and white stripes): never bought. Switches, vaulted upgrades, the never-buy list, and research while Buy research is off.
+  - **Skipped by AFK Baker** (black and white stripes): never bought. Switches, vaulted upgrades, the never-buy list, research while Buy research is off, and research past your grandmapocalypse limit.
   - Hovering an upgrade or a building adds a block to the game's tooltip with the rating in words, the payback period, its rank, how long until you can afford it and, for the gray and striped ones, why. So nothing depends on telling the colors apart. A building's tooltip lists buying 1, 10 and 100.
   - A building's price shows the rating for the amount the store is set to buy. It replaces the game's green or red price color; the game still dims a building you can't afford.
   - Click upgrades use their click payback period, the same as auto-buy.
@@ -68,6 +68,19 @@ Every feature can be turned on or off in **AFK Baker's own panel**. Open it with
   - **Lucky**: keeps 6,000× your unbuffed CpS banked.
   - **Lucky + Frenzy**: keeps 42,000× your unbuffed CpS banked.
 - **Research**: buys research upgrades as soon as it can afford them, respecting the reserve.
+- **Stop the grandmapocalypse at** (under Buy research; default Angered, which is no limit): how far research may take the grandmapocalypse. Research is a chain, where each purchase starts the next, so holding one upgrade back holds back everything after it.
+
+  | Setting | Research stops before | What you keep |
+  |---|---|---|
+  | Never start | One mind | no wrinklers, only golden cookies |
+  | Awoken (One Mind) | Communal brainsweep | wrinklers, and a third of golden cookies turn into wrath cookies |
+  | Displeased | Elder Pact | wrinklers twice as fast, two thirds wrath cookies |
+  | Angered (no limit) | nothing | wrinklers three times as fast, all wrath cookies |
+
+  - Wrinklers appear at every stage from Awoken on; only the speed differs.
+  - The research you give up is CpS: One mind and Communal brainsweep each add 0.02 base CpS per grandma to every grandma, Elder Pact adds 0.05 per portal, and Exotic nuts and Arcane sugar add 4% and 5%. **The setting's tooltip shows what each choice costs in CpS on your save**, worked out by the payback calculator. It changes through a run, as grandmas become a smaller or larger part of your CpS.
+  - Research held back is marked as skipped in the store, with the reason.
+  - **If the grandmas are already past the stage you pick**, there is no way back to a stage in between, and AFK Baker buys nothing to undo it. The Dashboard lists what you can do, with prices: an Elder Pledge (calm for 30 minutes, or 60 with Sacrificial rolling pins, and it pops every wrinkler), the Elder Covenant (calm for good, at 5% less CpS), or ascending, which starts research over.
 - **Elder Pledge** (off by default): buys Elder Pledge whenever the grandmapocalypse is active, plus Sacrificial rolling pins when they're available. Pledging stops wrinklers from spawning.
   - It never pledges in Feed mode.
   - It never pledges while a shiny wrinkler is on screen, because the game's pledge pops every wrinkler, shinies included.
@@ -159,10 +172,21 @@ Every feature can be turned on or off in **AFK Baker's own panel**. Open it with
   - When swaps run short it fills Diamond first, then Ruby, then Jade, and a single swap that puts two picks in place (two of your gods the wrong way round) comes first. If you change a pick mid-run, it follows, with the swaps you have.
   - A slot with no pick is left alone, and so is whatever god is in it, even one you picked for another slot.
   - **Holobore** is never slotted while golden cookie clicking is on: the game throws it out of its slot, and takes every worship swap, as soon as a golden cookie is clicked. The picker greys it out and says why. With golden cookie clicking off, it is slotted like any other.
-  - **Godzamok** can be picked, but does nothing for AFK play: AFK Baker never sells buildings. Its tooltip says so.
+  - **Godzamok** can be picked. He only does something with Godzamok combos on (below); otherwise AFK Baker never sells buildings. His tooltip says which.
   - The Pantheon needs a Temple level, not Temples: it keeps working when the dragon's training sacrifices every Temple. It doesn't run in a Born again run.
 - **Picking**: the Pantheon tab is a near-copy of the game's Pantheon screen, with the three slots and every god, using the game's own images and tooltips. Drag a god onto a slot, or click a god and then a slot. Drag a picked god off its slot, or use its x, to leave that slot alone. Until a Temple has a level the tab says how to unlock the Pantheon, and nothing can be picked yet.
 - The Dashboard shows your picks, what is slotted now, and what it's waiting for: a worship swap (with the time), a Temple level, or a god sitting in a slot you left alone.
+- **Godzamok combos** (off by default; in the Pantheon tab): with Godzamok slotted, selling buildings gives the buff Devastation, which raises click power for 10 seconds: 1% per building sold with him in the Diamond slot, 0.5% in Ruby, 0.25% in Jade. A combo sells whole building types and buys each straight back in the same game tick, so your CpS, the store and the payback numbers never see them gone.
+  - **What it costs**: a sale refunds 25% of a building's price and buying back costs the full price. Measured, a combo costs 71% of the price of buying back (less with the Earth Shatterer aura, which doubles the refund). Late in a run that is next to nothing; early on it can be hours of CpS.
+  - **When**: *During click buffs only* (default) makes a combo only while Click frenzy or Dragonflight is running, when a click is worth the most. *Whenever it pays* also makes one without a click buff. Late in a run that means every 10 seconds.
+  - **A combo is made only when all of this holds**: the autoclicker is on; Godzamok is slotted; no Devastation is running; the extra click income expected over the 10 seconds is at least 10 times the cost; and the bank above your cookie reserve covers buying everything back in full, without counting on the refunds. The expected income uses your click rate, cookies per click, and the time your current buffs have left.
+  - **One round per Devastation**, never stacked. Within a round it sells the types that give the most for their cost, several at once, while the total stays under **N% of the bank** (default 5, counted above the reserve), so combos don't eat what auto-buy is saving up.
+  - **Never sold**: Wizard towers (their number sets the size of the magic meter).
+  - **Grandmas are sold, but one always stays.** Selling the last Grandma would pop every wrinkler, end an Elder Pledge and stop the grandmapocalypse; with one left standing none of that happens. The first Grandma a combo sells wins the shadow achievement "Just wrong", if you don't have it yet.
+  - Farms, Banks and Temples are sold: the stock market and the Pantheon depend on those buildings' levels, not their number, and the garden only looks at the number of Farms at the moment you pick a soil. With the buildings back in the same tick, nothing in the three minigames changes; the tests compare them before and after.
+  - It never slots Godzamok for this (pick him in Auto-Pantheon if you want that) and never changes an aura. The dragon is not trained, and no aura is set, in the same tick as a combo.
+  - **If a building count ever comes back different, combos turn themselves off** and the Dashboard says which building and why.
+  - The Stats tab shows what combos cost and what the extra click power brought in.
 
 **Stock Market** (the Bank minigame; nothing happens until it's unlocked by giving the Bank a level)
 
@@ -235,11 +259,23 @@ How the market works, in short:
 - The threshold box takes plain digits (commas are fine) or scientific notation such as `1.146e15`, and is wide enough for 20 digits. Next to it, the mod shows the value in the game's own number format (for example `= 1.146 quadrillion`) so you can check you typed the right number of digits. Something that isn't a number keeps the old threshold.
 - **Safety guard**: auto-ascend only fires when you cross the threshold during play. If the threshold is already reached when the mod loads, when you turn auto-ascend on, or when you change the threshold, type or wrinkler mode, the mod shows a warning instead of ascending. To confirm, toggle auto-ascend off and on again.
 
-**Extras** (just for fun, all off by default)
-- **RedFox**: every "wrinkler" on screen reads "nibbler", keeping capitals: Wrinkler becomes Nibbler, wrinklers become nibblers, Shiny wrinkler becomes Shiny nibbler, Wrinklerspawn becomes Nibblerspawn. It covers tooltips, the menus, the news ticker, notifications, prompts, the dragon panel and AFK Baker's own text. Only the text you see changes: the names the game and AFK Baker use inside, and your save, stay as they are, and turning it off puts the original text back at once. It only works with the game in English; in another language its tooltip says so. Named after RedFox, who calls them nibblers.
-- **Sunder**: pets Krumblor nonstop, 1 to 30 times a second (default 10). The dragon panel stays open while it's on, which covers the lower left of the big cookie, and whatever panel was open before comes back when you turn it off. Regular auto-pet stands aside meanwhile. Pet sounds follow the mute setting. Each pet sends up a heart from Krumblor, as when you pet him yourself, if particles are on in the game's options. It needs the heavenly upgrade "Pet the dragon" and a hatched dragon, and says so on the Dashboard until then. Named after Sunder, who wants Krumblor petted at all times.
+**Stats**
+- **Count where cookies come from** (on by default): for the current run, how many cookies came from each source, as a share of everything gained:
+  - buildings, split into production at your CpS without buffs and the extra under buffs such as Frenzy and building specials;
+  - big cookie clicks, split into plain clicks and the extra from click buffs (Click frenzy, Dragonflight, Cursed finger, Devastation);
+  - golden cookies, wrath cookies, reindeer, wrinklers popped, fortune tickers, the Grimoire, and what the game earned while it was closed;
+  - **Other**: whatever is left of the game's "cookies baked" after all of that. Golden cookies and reindeer you click yourself, garden harvests, gifts and sugar blessings land here. Because Other is the remainder, the total always matches the game's.
+- **Losses** are listed separately: what wrinklers wither (it comes back when they pop), what Clot cost, bank losses such as Ruin and a backfired Conjure Baked Goods, and the cost of Godzamok combos. The stock market's effect on the bank has its own line.
+- **Past runs side by side**: when you ascend, the run joins the table as a column next to the current one, newest first. The last 20 runs are kept in your save and in the settings export. Importing a settings text adds its runs to yours and never removes one of your own. "Forget past runs" clears them, after a second click.
+- **Each run's setup**: dragon auras, Pantheon gods by slot, the grandmas' stage (or Pledge or Covenant) and the autoclicker rate. A setup can change during a run, so the table shows the one that was active longest and says whether it changed and what share of the run it held.
+- **Two numbers to compare runs by**:
+  - **Growth**: how fast your all-time cookies grew, per hour of the run. `+20% an hour` means that after each hour you had baked a fifth more, over all your runs, than an hour before. This is what earns prestige, and it compares runs of very different size. Growth slows down as a game goes on, so compare runs that are close together.
+  - **Income multiplier**: everything counted while the game ran, divided by what your buildings alone would have made at your CpS without buffs. `x3.00` means clicks, golden cookies, buffs and wrinklers tripled it.
+- **Only visible numbers**: it reads cookies baked, CpS with and without buffs, what wrinklers wither, cookies made by clicking, and the bank before and after AFK Baker's own clicks, casts and trades. No game function is wrapped or changed. It costs about a microsecond per game tick.
 
 **Other**
+- **RedFox** (just for fun, off by default): every "wrinkler" on screen reads "nibbler", keeping capitals: Wrinkler becomes Nibbler, wrinklers become nibblers, Shiny wrinkler becomes Shiny nibbler, Wrinklerspawn becomes Nibblerspawn. It covers tooltips, the menus, the news ticker, notifications, prompts, the dragon panel and AFK Baker's own text. Only the text you see changes: the names the game and AFK Baker use inside, and your save, stay as they are, and turning it off puts the original text back at once. It only works with the game in English; in another language its tooltip says so. Named after RedFox, who calls them nibblers.
+- **Sunder** (just for fun, off by default): pets Krumblor nonstop, 1 to 30 times a second (default 10). The dragon panel stays open while it's on, which covers the lower left of the big cookie, and whatever panel was open before comes back when you turn it off. Regular auto-pet stands aside meanwhile. Pet sounds follow the mute setting. Each pet sends up a heart from Krumblor, as when you pet him yourself, if particles are on in the game's options. It needs the heavenly upgrade "Pet the dragon" and a hatched dragon, and says so on the Dashboard until then. Named after Sunder, who wants Krumblor petted at all times.
 - **Debug logging**: extra console output. When the auto-buy decision changes, it prints the top 5 candidates (name, amount, PP, price, and why each was chosen or skipped; click upgrades are tagged `click`). It also lists the upgrades filtered out before ranking, and any infinite-PP upgrades that are still being skipped. If Cookie Monster is installed as well, debug logging compares the two: it logs how many payback periods agree within 1% and lists the ones that differ, with the likely reason. AFK Baker never uses Cookie Monster's numbers for its decisions.
 
 The Dashboard shows, for each feature:
@@ -255,6 +291,8 @@ The Dashboard shows, for each feature:
 - the stock market: shares held and what they're worth, the game's profit figure for this run, the market budget (`Budget $4,200 of $18,000`), the strategy in use, and the last trade with the rule that triggered it, e.g. `Bought 120 CHC at $8.40 (resting $21.00; 30% of resting or less)`; with brokers or the office on, a second row shows how many brokers you have, the current fee, and what the next broker or office upgrade is waiting for
 - the Grimoire: magic (current / max), the spell, what the cast is waiting for, and the last cast with its result, e.g. `Cast Force the Hand of Fate: Frenzy`. The result appears once the summoned cookie has been clicked
 - your progress toward the ascend threshold, plus the guard warning (red dot) when it's active
+- with a grandmapocalypse limit set, where research stops and the grandmas' stage now, or your options once they are past it
+- with Godzamok combos on, the running Devastation or what the next combo is waiting for, and the last combo with its cost
 
 ## Only what you can see
 

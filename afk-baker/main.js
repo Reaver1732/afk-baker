@@ -7,7 +7,7 @@
 	'use strict';
 
 	const MOD_ID = 'afk baker';
-	const VERSION = '2.1.0';
+	const VERSION = '2.2.0';
 	// Settings saved before a default changed are reset to the new default:
 	// v1 had auto-ascend on, v2 had Elder Pledge on, v3 had the Auto reserve.
 	const SETTINGS_VERSION = 4;
@@ -48,7 +48,19 @@
 		'hand of fate': 'Force the Hand of Fate',
 		'conjure baked goods': 'Conjure Baked Goods',
 	};
+	// How far research may take the grandmapocalypse. One research upgrade opens each stage, and research
+	// is a chain (each purchase starts the next), so holding that upgrade back holds back all that follow.
+	const GRANDMA_LIMITS = { never: 'Never start', awoken: 'Awoken (One Mind)', displeased: 'Displeased', angered: 'Angered (no limit)' };
+	const GRANDMA_LIMIT_STAGE = { never: 0, awoken: 1, displeased: 2, angered: 3 };
+	const GRANDMA_STAGE_UPGRADES = ['One mind', 'Communal brainsweep', 'Elder Pact'];
+	// The research from One mind on, in the order the game hands it out.
+	const GRANDMA_RESEARCH = ['One mind', 'Exotic nuts', 'Communal brainsweep', 'Arcane sugar', 'Elder Pact'];
+	// Indexed by Game.elderWrath.
+	const GRANDMA_STAGE_NAMES = ['Appeased', 'Awoken', 'Displeased', 'Angered'];
+	const GODZAMOK_MODES = { buffs: 'During click buffs only', always: 'Whenever it pays' };
 	const CYCLE_OPTIONS = {
+		grandmaLimit: GRANDMA_LIMITS,
+		godzamokMode: GODZAMOK_MODES,
 		reserveMode: RESERVE_MODES,
 		wrinklerMode: WRINKLER_MODES,
 		fortuneMode: FORTUNE_MODES,
@@ -185,6 +197,7 @@
 		marketBankPercent: [0, 100],
 		officeMinutes: [0, MAX_DRAGON_TRAIN_MINUTES],
 		sunderRate: [1, 30],
+		godzamokCapPercent: [1, 50],
 	};
 	const REINCARNATE_GRACE_MS = 3000;
 	const STATUS_REFRESH_MS = 500;
@@ -205,9 +218,50 @@
 	const PANTHEON_CHECK_INTERVAL_MS = 1000;
 	// The sounds of slotting a god (the game's drop: a tick and the spirit sound).
 	const PANTHEON_SOUND = /^snd\/(tick|spirit)\.mp3$/;
+	// Click power per building sold, by the slot Godzamok is in (Game.Object.sell in main.js): 0 is unslotted.
+	const GODZAMOK_BONUS = [0, 0.01, 0.005, 0.0025];
+	// How long the buff from a sale, Devastation, lasts.
+	const DEVASTATION_SECONDS = 10;
+	// A combo is only made if the extra click income expected is at least this many times its cost.
+	const GODZAMOK_MIN_RETURN = 10;
+	// Never sold: Wizard towers, since the magic meter's size comes from how many there are.
+	const GODZAMOK_NEVER_SELL = ['Wizard tower'];
+	// How many of a building a combo always leaves standing. Selling the last Grandma pops every wrinkler
+	// and ends an Elder Pledge (the Grandma's sellFunction), and with none the grandmapocalypse stops.
+	const GODZAMOK_KEEP = { Grandma: 1 };
+	const GODZAMOK_CHECK_INTERVAL_MS = 250;
+	const COMBO_SOUND = /^snd\/(sell|buy)\d\.mp3$/;
 	// Where "wrinkler" turns up on screen: tooltips, the menus, the news ticker, notifications, prompts,
 	// the dragon and Santa panel, and AFK Baker's own panel and tab.
 	const REDFOX_CONTAINERS = ['tooltip', 'menu', 'commentsText', 'notes', 'prompt', 'specialPopup', 'afkPanel', 'afkOpen'];
+	// Where cookies come from, in the order the Stats tab lists them: [key, label, explanation].
+	const INCOME_GAINS = [
+		['prod', 'Buildings', 'What your buildings make at your CpS without buffs.'],
+		['prodBuff', 'Buildings, extra under buffs', 'What Frenzy, building specials, Elder frenzy and other CpS buffs added on top.'],
+		['clicks', 'Big cookie clicks', 'Clicks on the big cookie, yours and the autoclicker\'s, at their strength without click buffs.'],
+		['clickBuff', 'Clicks, extra from click buffs', 'What Click frenzy, Dragonflight, Cursed finger and Devastation added to those clicks.'],
+		['golden', 'Golden cookies', 'Lucky, cookie chain and cookie storm payouts from golden cookies AFK Baker clicked.'],
+		['wrath', 'Wrath cookies', 'The same, from wrath cookies AFK Baker clicked.'],
+		['reindeer', 'Reindeer', ''],
+		['wrinklers', 'Wrinklers popped', 'What popped wrinklers paid out, by the game\'s own payout rule. What they withered first is under Losses.'],
+		['fortune', 'Fortune tickers', ''],
+		['grimoire', 'Grimoire', 'Conjure Baked Goods. A golden cookie from Force the Hand of Fate counts as a golden cookie.'],
+		['market', 'Stock market sales', 'Only the part of a sale the game counts as cookies baked. The market\'s whole effect on your bank is further down.'],
+		['offline', 'While the game was closed', ''],
+		['other', 'Other', 'Everything AFK Baker did not do itself: golden cookies and reindeer you clicked, garden harvests, gifts, sugar blessings. It is what is left of the game\'s "cookies baked" after everything above, so the total always matches the game\'s.'],
+		['sales', 'Building sales', 'Only where a Godzamok combo\'s refund lifted the bank above everything baked this run, which the game then counts as baked.'],
+		['uncounted', 'While AFK Baker was not counting', 'Baked this run before counting started, or while it was switched off.'],
+	];
+	const INCOME_LOSSES = [
+		['withered', 'Withered by wrinklers', 'Taken from production while wrinklers feed. It comes back, with interest, under Wrinklers popped.'],
+		['debuff', 'Lost to Clot and other CpS debuffs', 'How far production fell below your CpS without buffs.'],
+		['ruin', 'Ruin and other bank losses', 'Taken from the bank, not from cookies baked: Ruin from a wrath cookie, a backfired Conjure Baked Goods.'],
+		['combo', 'Godzamok combos, cost', 'What selling buildings and buying them back cost the bank. What it bought is under Clicks, extra from click buffs.'],
+	];
+	const INCOME_HISTORY_MAX = 20;
+	// A run's setup changes a few times at most; past this many different ones the rest are not told apart.
+	const INCOME_SETUPS_MAX = 24;
+	const INCOME_SAMPLE_MS = 1000;
 	// What an exported settings text starts with.
 	const EXPORT_PREFIX = 'AFKB1:';
 	// Below this width the panel's dashboard stacks its columns.
@@ -220,16 +274,16 @@
 		clickRate: 'Big cookie clicks per second', muteCookieClick: 'Mute big cookie click sound', clickGolden: 'Golden cookies',
 		clickWrath: 'Include wrath cookies', clickReindeer: 'Reindeer', wrinklerMode: 'Wrinklers', clickFortunes: 'Fortune tickers',
 		fortuneMode: 'Fortune clicks', autoBuy: 'Auto-buy', muteBuySounds: 'Mute auto-buy purchase sounds', reserveMode: 'Cookie reserve',
-		autoReserveMinutes: 'Auto reserve: minutes without a reserve', buyResearch: 'Buy research', elderPledge: 'Elder Pledge',
+		autoReserveMinutes: 'Auto reserve: minutes without a reserve', buyResearch: 'Buy research', grandmaLimit: 'Stop the grandmapocalypse at', elderPledge: 'Elder Pledge',
 		buyUtility: 'Buy no-payback upgrades when cheap', overlayColors: 'Store rating colors', ratingBar: 'Rating counts above the upgrades', showBuyLine: 'Show what auto-buy is doing', utilityMinutes: 'No-payback upgrades: limit, minutes of CpS', utilityCpsMinutes: 'No-payback upgrades priced in CpS: limit, minutes of CpS',
 		storeOverlay: 'Show ratings in the store', autoHarvestLumps: 'Auto-harvest sugar lumps', autoSpendLumps: 'Auto-spend sugar lumps',
 		keepLumps: 'Lumps to keep', lumpPriority: 'Sugar lump priority list', autoTrainDragon: 'Auto-train dragon',
 		dragonTrainMinutes: 'Dragon training limit, minutes of CpS', dragonAura1: 'Primary aura', dragonAura2: 'Secondary aura',
-		autoPetDragon: 'Auto-pet dragon', autoPantheon: 'Auto-Pantheon', pantheonDiamond: 'Pantheon: Diamond slot', pantheonRuby: 'Pantheon: Ruby slot', pantheonJade: 'Pantheon: Jade slot',
+		autoPetDragon: 'Auto-pet dragon', autoPantheon: 'Auto-Pantheon', pantheonDiamond: 'Pantheon: Diamond slot', pantheonRuby: 'Pantheon: Ruby slot', pantheonJade: 'Pantheon: Jade slot', godzamokCombo: 'Godzamok combos', godzamokMode: 'Godzamok combos: when', godzamokCapPercent: 'Godzamok combos: limit, % of the bank',
 		redFox: 'RedFox', sunder: 'Sunder', sunderRate: 'Sunder: pets per second', autoTrade: 'Auto-trade stocks', marketStrategy: 'Stock strategy', marketBuyPercent: 'Buy at % of resting value',
 		marketSellPercent: 'Sell at % of resting value', marketBankPercent: '% of the bank the market may use', marketSellAtLoss: 'Sell at a loss',
 		autoBrokers: 'Hire brokers', autoOffice: 'Upgrade office', officeMinutes: 'Office upgrade limit, minutes of CpS', autoCast: 'Auto-cast spell',
-		grimoireSpell: 'Spell', autoAscend: 'Auto-ascend', ascendMode: 'Threshold type', ascendThreshold: 'Ascend threshold', debug: 'Debug logging',
+		grimoireSpell: 'Spell', trackIncome: 'Count where cookies come from', autoAscend: 'Auto-ascend', ascendMode: 'Threshold type', ascendThreshold: 'Ascend threshold', debug: 'Debug logging',
 	};
 
 	const DEFAULTS = {
@@ -246,6 +300,7 @@
 		reserveMode: 'off',
 		autoReserveMinutes: 30,
 		buyResearch: true,
+		grandmaLimit: 'angered',
 		elderPledge: false,
 		buyUtility: true,
 		ratingBar: true,
@@ -266,6 +321,9 @@
 		pantheonDiamond: '',
 		pantheonRuby: '',
 		pantheonJade: '',
+		godzamokCombo: false,
+		godzamokMode: 'buffs',
+		godzamokCapPercent: 5,
 		autoTrade: false,
 		marketStrategy: 'restingGuide',
 		marketBuyPercent: 30,
@@ -283,6 +341,7 @@
 		redFox: false,
 		sunder: false,
 		sunderRate: 10,
+		trackIncome: true,
 		debug: false,
 	};
 
@@ -391,6 +450,82 @@
 		return settings;
 	}
 
+	function freshRun() {
+		return { start: 0, allStart: 0, seen: 0, gains: {}, losses: {}, base: 0, bank: 0, setups: {} };
+	}
+
+	function freshIncome() {
+		return { run: freshRun(), history: [] };
+	}
+
+	function finiteOr(value, fallback) {
+		return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+	}
+
+	// The amounts of a run by category. Only known categories and real numbers are kept.
+	function sanitizeBook(raw, categories) {
+		const book = {};
+		if (!raw || typeof raw !== 'object') return book;
+		for (const category of categories) {
+			const amount = finiteOr(raw[category[0]], 0);
+			if (amount) book[category[0]] = amount;
+		}
+		return book;
+	}
+
+	// A run's setup: { a: aura names, g: the gods by slot, w: the grandmas' mood, c: autoclicker rate }.
+	function sanitizeSetup(raw) {
+		const text = function (value) { return typeof value === 'string' ? value.slice(0, 40) : ''; };
+		const list = function (value, max) { return Array.isArray(value) ? value.slice(0, max).map(text) : []; };
+		const setup = raw && typeof raw === 'object' ? raw : {};
+		return { a: list(setup.a, 2), g: list(setup.g, 3), w: text(setup.w), c: clampInt(setup.c, 0, MAX_CLICK_RATE, 0) };
+	}
+
+	// A finished run, or null if it doesn't make sense.
+	function sanitizeRecord(raw) {
+		if (!raw || typeof raw !== 'object') return null;
+		const record = {
+			start: finiteOr(raw.start, 0), end: finiteOr(raw.end, 0), baked: finiteOr(raw.baked, 0),
+			allStart: finiteOr(raw.allStart, -1), allEnd: finiteOr(raw.allEnd, 0), prestige: Math.max(0, finiteOr(raw.prestige, 0)),
+			gains: sanitizeBook(raw.gains, INCOME_GAINS), losses: sanitizeBook(raw.losses, INCOME_LOSSES),
+			base: Math.max(0, finiteOr(raw.base, 0)), bank: finiteOr(raw.bank, 0),
+			setup: sanitizeSetup(raw.setup), share: clampInt(raw.share, 0, 100, 100), changed: raw.changed === true,
+		};
+		if (!(record.start > 0) || record.end < record.start || !(record.baked > 0) || record.allStart < 0 || record.allEnd < record.allStart) return null;
+		return record;
+	}
+
+	function sanitizeHistory(raw) {
+		if (!Array.isArray(raw)) return [];
+		return raw.slice(0, INCOME_HISTORY_MAX).map(sanitizeRecord).filter(Boolean);
+	}
+
+	function sanitizeIncome(raw) {
+		const income = freshIncome();
+		if (!raw || typeof raw !== 'object') return income;
+		income.history = sanitizeHistory(raw.history);
+		const run = raw.run;
+		if (!run || typeof run !== 'object' || !(finiteOr(run.start, 0) > 0)) return income;
+		income.run = {
+			start: run.start, allStart: Math.max(0, finiteOr(run.allStart, 0)), seen: Math.max(0, finiteOr(run.seen, 0)),
+			gains: sanitizeBook(run.gains, INCOME_GAINS), losses: sanitizeBook(run.losses, INCOME_LOSSES),
+			base: Math.max(0, finiteOr(run.base, 0)), bank: finiteOr(run.bank, 0), setups: {},
+		};
+		// How long each setup was active, in seconds, keyed by the setup as JSON.
+		if (run.setups && typeof run.setups === 'object') {
+			for (const key of Object.keys(run.setups).slice(0, INCOME_SETUPS_MAX)) {
+				const seconds = finiteOr(run.setups[key], 0);
+				if (!(seconds > 0)) continue;
+				try {
+					income.run.setups[JSON.stringify(sanitizeSetup(JSON.parse(key)))] = seconds;
+				} catch (e) {
+					// Not a setup; dropped.
+				}
+			}
+		}
+		return income;
+	}
+
 	const state = {
 		lastClickTime: 0,
 		owedClicks: 0,
@@ -423,6 +558,7 @@
 		paused: false,
 		importDraft: { text: '', preview: null, error: '' },
 		exportCopied: false,
+		statsClearArmed: false, // "Forget past runs" was clicked once and waits for a second click
 		renderedDragonLevel: -1,
 		lastLiveHtml: '',
 		nextDragonCheckAt: 0,
@@ -435,6 +571,10 @@
 		nextMarketCheckAt: 0,
 		nextPantheonCheckAt: 0,
 		lastPantheonAction: '',
+		nextComboCheckAt: 0,
+		comboCount: 0,
+		comboLast: '',
+		comboStopped: '', // why Godzamok combos turned themselves off, or ''
 		godDrag: null, // a god being dragged in the Pantheon tab
 		godSelected: '', // a god clicked in the Pantheon tab, to be put in the next slot clicked
 		auraSlot: '', // the aura slot whose picker is open in the Dragon tab
@@ -527,6 +667,7 @@
 		version: VERSION,
 		ext: ext,
 		settings: sanitizeSettings(null),
+		income: freshIncome(),
 		state: state,
 		init: function () {
 			Game.registerHook('logic', onLogic);
@@ -540,7 +681,7 @@
 			console.log(`${LOG_PREFIX} v${VERSION} loaded.`);
 		},
 		save: function () {
-			return JSON.stringify(Object.assign({ settingsVersion: SETTINGS_VERSION }, mod.settings));
+			return JSON.stringify(Object.assign({ settingsVersion: SETTINGS_VERSION }, mod.settings, { income: mod.income }));
 		},
 		load: function (str) {
 			let parsed = null;
@@ -550,6 +691,9 @@
 				debugLog('Bad save data, using defaults.', e);
 			}
 			mod.settings = sanitizeSettings(parsed);
+			mod.income = sanitizeIncome(parsed && parsed.income);
+			stopCounting();
+			tracker.loaded = true;
 			applyColors();
 			state.ascendWarning = false;
 			state.needsLoadCheck = true;
@@ -576,6 +720,7 @@
 	function onLogic() {
 		// An exception here would escape Game.Logic and stop the game loop, so contain it.
 		try {
+			trackIncome(Date.now());
 			if (isAscending()) {
 				state.owedClicks = 0;
 				state.lastClickTime = 0;
@@ -594,9 +739,11 @@
 			if (s.clickGolden || s.clickReindeer) clickShimmers();
 			if (s.wrinklerMode === 'instant') popWrinklers(false);
 			if (s.clickFortunes) clickFortune();
+			const comboMade = runGodzamok(now);
 			runAutoBuy(now);
 			runLumps(now);
-			runDragon(now);
+			// The dragon trainer sacrifices buildings and an aura change costs one: never in a combo's tick.
+			if (!comboMade) runDragon(now);
 			runMarket(now);
 			runGrimoire(now);
 			runPantheon(now);
@@ -620,7 +767,8 @@
 		forgetGrimoireRun();
 	}
 
-	function onReset() {
+	function onReset(hard) {
+		endIncomeRun(hard);
 		state.ascendTriggered = false;
 		state.ascendWarning = false;
 		state.buyResumeAt = Date.now() + REINCARNATE_GRACE_MS;
@@ -731,7 +879,7 @@
 			} else {
 				continue;
 			}
-			shimmer.pop();
+			countIncome(shimmer.type === 'reindeer' ? 'reindeer' : shimmer.wrath ? 'wrath' : 'golden', function () { shimmer.pop(); });
 			if (shimmer === state.spellCookie) noteSpellCookieClicked();
 		}
 	}
@@ -741,7 +889,7 @@
 		if (!effect || effect.type !== 'fortune') return;
 		// sub is the upgrade to unlock, or the strings 'fortuneGC' / 'fortuneCPS'.
 		if (settings().fortuneMode === 'upgrades' && typeof effect.sub !== 'object') return;
-		Game.tickerL.click();
+		countIncome('fortune', function () { Game.tickerL.click(); });
 	}
 
 	/* =====================================================================
@@ -800,6 +948,296 @@
 			}
 		}
 		return summary;
+	}
+
+	/* =====================================================================
+	   INCOME
+	   Where the run's cookies came from, counted from numbers the game shows: cookies baked, CpS with
+	   and without buffs, what the wrinklers wither, cookies made by clicking. No game function is
+	   wrapped. AFK Baker's own actions (popping a golden cookie, a cast, a trade) are measured by
+	   reading the bank before and after. Whatever is left of the change in "cookies baked" each tick
+	   goes to Other, so the total always matches the game's.
+	   ===================================================================== */
+
+	const tracker = {
+		earned: null, // Game.cookiesEarned at the last tick; null while not counting
+		handmade: 0,
+		clickMult: 1, // the click buffs' combined multiplier at the last tick
+		booked: 0, // baked by AFK Baker's own actions since the last tick, already counted
+		wrinklers: [], // per wrinkler slot: { sucked, type } at the last tick
+		lastSample: 0,
+		lastTick: 0,
+		loaded: false, // a save was just loaded: what was baked meanwhile is offline income
+	};
+	mod.tracker = tracker;
+
+	function addIncome(book, category, amount) {
+		book[category] = (book[category] || 0) + amount;
+	}
+
+	function stopCounting() {
+		tracker.earned = null;
+		tracker.booked = 0;
+		tracker.wrinklers = [];
+	}
+
+	// What the click buffs multiply a click by (Game.mouseCps). A Cursed finger replaces the click outright.
+	function clickBuffMultiplier() {
+		if (Game.buffs['Cursed finger']) return Infinity;
+		let mult = 1;
+		for (const name in Game.buffs) {
+			const multClick = Game.buffs[name].multClick;
+			if (typeof multClick === 'number' && multClick > 1) mult *= multClick;
+		}
+		return mult;
+	}
+
+	function currentSetup() {
+		const auras = [Game.dragonAura, Game.dragonAura2].filter(function (id) { return id > 0 && Game.dragonAuras[id]; })
+			.map(function (id) { return Game.dragonAuras[id].name; });
+		const M = pantheon();
+		const gods = M ? [0, 1, 2].map(function (slot) { return M.slot[slot] !== -1 ? shortGodName(M.godsById[M.slot[slot]]) : '-'; }) : [];
+		return sanitizeSetup({ a: auras, g: gods, w: grandmaMood(), c: state.paused ? 0 : settings().clickRate });
+	}
+
+	// Counting starts: at load, when it is switched on, or in a run AFK Baker has no record of.
+	function startCounting(now) {
+		const income = mod.income;
+		const earned = Game.cookiesEarned;
+		if (income.run.start !== Game.startDate) {
+			income.run = freshRun();
+			income.run.start = Game.startDate;
+			income.run.allStart = Game.cookiesReset;
+			if (earned > 0) income.run.gains.uncounted = earned;
+		} else if (earned > income.run.seen) {
+			addIncome(income.run.gains, tracker.loaded ? 'offline' : 'uncounted', earned - income.run.seen);
+		}
+		income.run.seen = earned;
+		tracker.earned = earned;
+		tracker.handmade = Game.handmadeCookies;
+		tracker.clickMult = clickBuffMultiplier();
+		tracker.booked = 0;
+		tracker.wrinklers = [];
+		tracker.lastSample = now;
+		tracker.lastTick = now;
+		tracker.loaded = false;
+	}
+
+	// Once a game tick, before AFK Baker does anything: books what the tick that just ran brought in.
+	function trackIncome(now) {
+		if (!settings().trackIncome) {
+			if (tracker.earned !== null) stopCounting();
+			return;
+		}
+		if (tracker.earned === null || mod.income.run.start !== Game.startDate) {
+			startCounting(now);
+			return;
+		}
+		const run = mod.income.run;
+		const earned = Game.cookiesEarned;
+		const delta = earned - tracker.earned;
+		tracker.earned = earned;
+		run.seen = earned;
+		tracker.lastTick = now;
+		let known = tracker.booked;
+		tracker.booked = 0;
+
+		// Production (Game.Logic: Game.Earn(cookiesPs / fps), then the wrinklers' share is taken off).
+		if (!isAscending()) {
+			const base = Game.unbuffedCps / Game.fps;
+			const made = Game.cookiesPs / Game.fps;
+			if (base > 0 || made > 0) {
+				addIncome(run.gains, 'prod', base);
+				run.base += base;
+				if (made > base) addIncome(run.gains, 'prodBuff', made - base);
+				else if (made < base) addIncome(run.losses, 'debuff', base - made);
+				const withered = made * Game.cpsSucked;
+				if (withered > 0) addIncome(run.losses, 'withered', withered);
+				known += made - withered;
+			}
+		}
+
+		// Clicks, split by the click buffs that were active when they were made.
+		const handmade = Game.handmadeCookies - tracker.handmade;
+		tracker.handmade = Game.handmadeCookies;
+		if (handmade > 0) {
+			const plain = handmade / tracker.clickMult;
+			if (plain > 0) addIncome(run.gains, 'clicks', plain);
+			if (handmade > plain) addIncome(run.gains, 'clickBuff', handmade - plain);
+			known += handmade;
+		}
+		// A buff that came or went this tick only changes what a click is worth once the game has
+		// recalculated; until then the clicks are still made at the old strength.
+		if (!Game.recalculateGains) tracker.clickMult = clickBuffMultiplier();
+
+		// A wrinkler whose stomach emptied was popped, by AFK Baker, the player or a pledge.
+		const seen = tracker.wrinklers;
+		for (let i = 0; i < Game.wrinklers.length; i++) {
+			const wrinkler = Game.wrinklers[i];
+			const last = seen[i];
+			if (!last) {
+				seen[i] = { sucked: wrinkler.sucked, type: wrinkler.type };
+				continue;
+			}
+			if (last.sucked > 0.5 && wrinkler.sucked < last.sucked) {
+				const paid = wrinklerPayout(last);
+				addIncome(run.gains, 'wrinklers', paid);
+				known += paid;
+			}
+			last.sucked = wrinkler.sucked;
+			last.type = wrinkler.type;
+		}
+
+		if (delta !== known) addIncome(run.gains, 'other', delta - known);
+
+		if (now - tracker.lastSample >= INCOME_SAMPLE_MS) {
+			// Capped, so time the game spent frozen is not credited to a setup.
+			const seconds = Math.min(now - tracker.lastSample, 5 * INCOME_SAMPLE_MS) / 1000;
+			tracker.lastSample = now;
+			const key = JSON.stringify(currentSetup());
+			if (hasKey(run.setups, key) || Object.keys(run.setups).length < INCOME_SETUPS_MAX) run.setups[key] = (run.setups[key] || 0) + seconds;
+		}
+	}
+
+	// Runs one of AFK Baker's own actions and books what it paid out under `category`. A payout shows as a
+	// rise in cookies baked; a loss (Ruin, a backfire) only as a drop in the bank.
+	function countIncome(category, action) {
+		if (tracker.earned === null) return action();
+		const earned = Game.cookiesEarned;
+		const bank = Game.cookies;
+		const result = action();
+		const gained = Game.cookiesEarned - earned;
+		if (gained > 0) {
+			addIncome(mod.income.run.gains, category, gained);
+			tracker.booked += gained;
+		} else if (Game.cookies < bank) {
+			addIncome(mod.income.run.losses, 'ruin', bank - Game.cookies);
+		}
+		return result;
+	}
+
+	// A stock trade moves cookies in and out of the bank. The game only counts a sale as cookies baked
+	// where it lifts the bank above everything baked this run.
+	function countMarket(trade) {
+		if (tracker.earned === null) return trade();
+		const earned = Game.cookiesEarned;
+		const bank = Game.cookies;
+		const result = trade();
+		mod.income.run.bank += Game.cookies - bank;
+		const gained = Game.cookiesEarned - earned;
+		if (gained > 0) {
+			addIncome(mod.income.run.gains, 'market', gained);
+			tracker.booked += gained;
+		}
+		return result;
+	}
+
+	function roundAmount(amount) {
+		return Number(amount.toPrecision(6));
+	}
+
+	function roundBook(book) {
+		const rounded = {};
+		for (const category in book) {
+			if (book[category]) rounded[category] = roundAmount(book[category]);
+		}
+		return rounded;
+	}
+
+	// The setup that was active longest, what share of the counted time it held, and whether it ever changed.
+	function longestSetup(run) {
+		let best = '';
+		let total = 0;
+		for (const key in run.setups) {
+			total += run.setups[key];
+			if (!best || run.setups[key] > run.setups[best]) best = key;
+		}
+		if (!best) return { setup: currentSetup(), share: 100, changed: false };
+		return { setup: sanitizeSetup(JSON.parse(best)), share: Math.round(run.setups[best] / total * 100), changed: Object.keys(run.setups).length > 1 };
+	}
+
+	// A run as the Stats tab shows it and the save keeps it. allStart and allEnd are the all-time cookies
+	// baked (the game's "cookies baked (all time)") when the run began and ended.
+	function runRecord(run, end, baked) {
+		const allEnd = run.allStart + baked;
+		const setup = longestSetup(run);
+		return {
+			start: run.start, end: end, baked: baked, allStart: run.allStart, allEnd: allEnd,
+			prestige: Math.max(0, Math.floor(Game.HowMuchPrestige(allEnd)) - Math.floor(Game.HowMuchPrestige(run.allStart))),
+			gains: roundBook(run.gains), losses: roundBook(run.losses), base: roundAmount(run.base), bank: run.bank ? roundAmount(run.bank) : 0,
+			setup: setup.setup, share: setup.share, changed: setup.changed,
+		};
+	}
+
+	function liveRecord() {
+		return runRecord(mod.income.run, Date.now(), Game.cookiesEarned);
+	}
+
+	// The game's reset hook: an ascension (the run goes into the history) or a wipe (everything goes).
+	// Game.Reset has already added the run's cookies to the all-time total and zeroed the run.
+	function endIncomeRun(hard) {
+		if (hard) {
+			mod.income = freshIncome();
+			stopCounting();
+			return;
+		}
+		const income = mod.income;
+		const run = income.run;
+		if (tracker.earned !== null && run.start > 0 && run.seen > 0) {
+			let baked = run.seen;
+			// Anything baked after the last tick AFK Baker saw.
+			const missed = Game.cookiesReset - run.allStart - baked;
+			if (missed > baked * 1e-9) {
+				addIncome(run.gains, 'other', missed);
+				baked += missed;
+			}
+			income.history.unshift(runRecord(run, tracker.lastTick || Date.now(), baked));
+			income.history.length = Math.min(income.history.length, INCOME_HISTORY_MAX);
+		}
+		income.run = freshRun();
+		income.run.start = Game.startDate;
+		income.run.allStart = Game.cookiesReset;
+		if (tracker.earned === null) return;
+		stopCounting();
+		tracker.earned = Game.cookiesEarned;
+		tracker.handmade = Game.handmadeCookies;
+		tracker.clickMult = 1;
+		tracker.lastSample = Date.now();
+		tracker.lastTick = tracker.lastSample;
+	}
+
+	function runHours(record) {
+		return Math.max(0, record.end - record.start) / 3600000;
+	}
+
+	// How many times over the all-time cookies grew per hour of the run: the number that drives prestige,
+	// and one that can be compared between runs of very different size. null for a first run.
+	function growthPerHour(record) {
+		const hours = runHours(record);
+		if (!(record.allStart > 0) || !(hours > 0)) return null;
+		return Math.log10(record.allEnd / record.allStart) / hours;
+	}
+
+	function growthText(record) {
+		const log = growthPerHour(record);
+		if (log === null) return '&ndash;';
+		if (!(log > 0)) return '+0% an hour';
+		if (log >= 6) return `x10<sup>${Math.round(log)}</sup> an hour`;
+		const factor = Math.pow(10, log);
+		if (factor < 2) return `+${((factor - 1) * 100).toFixed(factor < 1.1 ? 2 : 1)}% an hour`;
+		return `x${factor < 100 ? factor.toFixed(2) : Beautify(Math.round(factor))} an hour`;
+	}
+
+	// Everything counted while the game ran, against what the buildings alone would have made at CpS
+	// without buffs: how much clicks, golden cookies, buffs and wrinklers added. null if nothing was counted.
+	function incomeMultiplier(record) {
+		if (!(record.base > 0)) return null;
+		let counted = 0;
+		for (const category in record.gains) {
+			if (category !== 'offline' && category !== 'uncounted') counted += record.gains[category];
+		}
+		counted -= (record.losses.withered || 0) + (record.losses.debuff || 0);
+		return counted / record.base;
 	}
 
 	/* =====================================================================
@@ -1471,7 +1909,66 @@
 		if (upgrade.priceLumps > 0) return 'costs sugar lumps';
 		// Selectors open a menu instead of buying, and buy() still reports success.
 		if (upgrade.choicesFunction) return 'selector';
+		if (isPastGrandmaLimit(upgrade)) return 'grandmapocalypse limit';
 		return '';
+	}
+
+	// True for the research upgrade that would open a stage beyond the player's limit.
+	function isPastGrandmaLimit(upgrade) {
+		return GRANDMA_STAGE_UPGRADES.indexOf(upgrade.name) + 1 > GRANDMA_LIMIT_STAGE[settings().grandmaLimit];
+	}
+
+	// The highest stage the research already bought lets the grandmas reach (Game.UpdateGrandmapocalypse).
+	function openedGrandmaStage() {
+		return GRANDMA_STAGE_UPGRADES.filter(function (name) { return Game.Has(name); }).length;
+	}
+
+	// The grandmas' mood in a word, from what the game shows.
+	function grandmaMood() {
+		if (Game.Has('Elder Covenant')) return 'Covenant';
+		if (Game.pledgeT > 0) return 'Pledge';
+		return GRANDMA_STAGE_NAMES[Game.elderWrath] || GRANDMA_STAGE_NAMES[0];
+	}
+
+	// Unbuffed CpS with the grandmapocalypse research owned up to each limit, worked out by the payback
+	// simulator for the game as it is now. null while the simulator isn't ready.
+	function grandmaLimitCps() {
+		const sim = calc.sim;
+		if (!sim || !calc.verified || calc.blocked) return null;
+		const cps = {};
+		try {
+			for (const limit in GRANDMA_LIMIT_STAGE) {
+				// Each stage's upgrade and the plain CpS research that follows it.
+				const owned = Math.min(GRANDMA_RESEARCH.length, GRANDMA_LIMIT_STAGE[limit] * 2);
+				resetSim(sim);
+				GRANDMA_RESEARCH.forEach(function (name, i) {
+					sim.shadow.Upgrades[name] = Object.create(Game.Upgrades[name], { bought: { value: i < owned ? 1 : 0 } });
+				});
+				cps[limit] = runSim(sim).cps;
+			}
+		} catch (e) {
+			return null;
+		}
+		return cps.angered > 0 ? cps : null;
+	}
+
+	function grandmaLimitName(limit) {
+		return GRANDMA_LIMITS[limit].replace(/ \(.*$/, '');
+	}
+
+	function grandmaLimitTip() {
+		let text = 'Research is a chain: each upgrade starts the next, so holding one back holds back everything after it. ' +
+			'Never start stops before One mind, Awoken before Communal brainsweep, Displeased before Elder Pact. ' +
+			'Wrinklers appear from Awoken on, three times as fast at Angered as at Awoken, and wrath cookies replace a third, two thirds, then all of the golden cookies. ';
+		const cps = grandmaLimitCps();
+		if (cps) {
+			text += 'On this save, next to letting research run to the end, your CpS would be: ' + Object.keys(GRANDMA_LIMITS).map(function (limit) {
+				return `${grandmaLimitName(limit)} ${Math.round(cps[limit] / cps.angered * 100)}%`;
+			}).join(', ') + '. ';
+		} else {
+			text += 'What each choice costs in CpS on this save is shown here once AFK Baker has its payback numbers (auto-buy or the store ratings must be on). ';
+		}
+		return text + 'If the grandmas are already past the stage you pick, AFK Baker buys nothing to undo it: the Dashboard lists your options.';
 	}
 
 	function isAllowedUpgrade(upgrade) {
@@ -2430,7 +2927,7 @@
 		const price = M.getGoodPrice(good);
 		const basis = costBasis(M, good);
 		const paid = basis.cost / basis.shares;
-		if (!withSoundsMuted(MARKET_SOUND, function () { return M.sellGood(good.id, shares); })) return false;
+		if (!countMarket(function () { return withSoundsMuted(MARKET_SOUND, function () { return M.sellGood(good.id, shares); }); })) return false;
 		costBasis(M, good);
 		state.lastTrade = `Sold ${shares} ${good.symbol} at ${dollars(price)} (resting ${dollars(M.getRestingVal(good.id))}, paid ${dollars(paid)} with fees${reason ? '; ' + reason : ''})`;
 		debugLog(state.lastTrade);
@@ -2443,7 +2940,7 @@
 		costBasis(M, good);
 		// 10000 is M.buyGood's code for "as many as the bank allows".
 		const amount = shares === 10000 ? 9999 : shares;
-		if (!withSoundsMuted(MARKET_SOUND, function () { return M.buyGood(good.id, amount); })) return false;
+		if (!countMarket(function () { return withSoundsMuted(MARKET_SOUND, function () { return M.buyGood(good.id, amount); }); })) return false;
 		// M.buyGood has set good.prev to this price, so this records the new shares at what they cost.
 		costBasis(M, good);
 		state.lastTrade = `Bought ${good.stock - before} ${good.symbol} at ${dollars(price)} (resting ${dollars(M.getRestingVal(good.id))}${reason ? '; ' + reason : ''})`;
@@ -2699,7 +3196,7 @@
 		};
 		let cast;
 		try {
-			cast = M.castSpell(spell);
+			cast = countIncome('grimoire', function () { return M.castSpell(spell); });
 		} finally {
 			window.PlaySound = originalPlaySound;
 			Game.SparkleAt = savedSparkle;
@@ -2945,6 +3442,172 @@
 	}
 
 	/* =====================================================================
+	   GODZAMOK COMBOS
+	   With Godzamok slotted, selling buildings gives Devastation: +1% click power per building sold
+	   (Diamond slot; half that in Ruby, a quarter in Jade) for 10 seconds. A combo sells whole building
+	   types and buys each straight back, all inside one game tick, so CpS, the store and the payback
+	   numbers never see them gone. What it costs is the gap between the refund and the price of buying
+	   back. Decisions use what the game shows: buffs and their timers, prices, the bank, cookies per click.
+	   ===================================================================== */
+
+	// The buffs other than Devastation that change what a click is worth: whether one of them is a click
+	// buff, and the shortest time any of them has left (capped at Devastation's own length).
+	function clickBuffWindow() {
+		let click = false;
+		let seconds = DEVASTATION_SECONDS;
+		for (const name in Game.buffs) {
+			const buff = Game.buffs[name];
+			if (name === 'Devastation') continue;
+			const clicks = typeof buff.multClick === 'number' && buff.multClick !== 1;
+			const cps = typeof buff.multCpS === 'number' && buff.multCpS !== 1;
+			if (!clicks && !cps) continue;
+			if (clicks && buff.multClick > 1) click = true;
+			seconds = Math.min(seconds, buff.time / Game.fps);
+		}
+		return { click: click, seconds: seconds };
+	}
+
+	// What a combo would sell right now: { sales, sold, cost, rebuy, gain, mult }, or { wait: why not }.
+	function comboPlan() {
+		const s = settings();
+		if (!pantheon()) return { wait: 'the Pantheon' };
+		const level = Game.hasGod('ruin');
+		if (!level) return { wait: 'Godzamok in a Pantheon slot' };
+		const rate = effectiveClickRate();
+		if (!(rate > 0)) return { wait: 'the autoclicker, which is off' };
+		// Game.mouseCps: a Cursed finger sets the click's worth outright, after the click buffs.
+		if (Game.buffs['Cursed finger']) return { wait: 'the Cursed finger to end (Devastation does nothing during it)' };
+		const running = Game.buffs['Devastation'];
+		if (running) return { running: running, wait: 'Devastation to run out' };
+		const buffs = clickBuffWindow();
+		if (s.godzamokMode === 'buffs' && !buffs.click) return { wait: 'a click buff (Click frenzy or Dragonflight)' };
+		if (Game.recalculateGains) return { wait: 'the game to recalculate its CpS' };
+
+		// Cookies per click now, and once the buffs running now are over. Click power mostly follows CpS,
+		// so a CpS buff is taken out too; where it doesn't follow, this only makes the estimate lower.
+		const perClick = Game.computedMouseCps;
+		const cpsBuff = Game.unbuffedCps > 0 ? Math.max(1, Game.cookiesPs / Game.unbuffedCps) : 1;
+		const plainClick = perClick / clickBuffMultiplier() / cpsBuff;
+		// What one building sold adds over Devastation's 10 seconds.
+		const perBuilding = rate * GODZAMOK_BONUS[level] * (buffs.seconds * perClick + (DEVASTATION_SECONDS - buffs.seconds) * plainClick);
+		const spendable = Math.max(0, Game.cookies - reserveAmount());
+		const cap = spendable * s.godzamokCapPercent / 100;
+		const options = [];
+		for (const building of Game.ObjectsById) {
+			if (GODZAMOK_NEVER_SELL.indexOf(building.name) !== -1) continue;
+			const amount = building.amount - (GODZAMOK_KEEP[building.name] || 0);
+			if (!(amount > 0)) continue;
+			const sellShare = building.getSellMultiplier();
+			// getReverseSumPrice is the price of the last units bought times the refund share: undone, it is
+			// what buying them back costs. A sale refunds each unit at the next unit's price (Game.Object.sell).
+			const rebuy = building.getReverseSumPrice(amount) / sellShare;
+			const cost = rebuy * (1 - sellShare * Game.priceIncrease);
+			const gain = perBuilding * amount;
+			if (!(cost > 0) || !(gain >= cost * GODZAMOK_MIN_RETURN)) continue;
+			options.push({ building: building, amount: amount, rebuy: rebuy, cost: cost, gain: gain });
+		}
+		if (!options.length) return { wait: `a combo that brings in ${GODZAMOK_MIN_RETURN} times its cost` };
+		options.sort(function (a, b) { return b.gain / b.cost - a.gain / a.cost; });
+		const plan = { sales: [], sold: 0, cost: 0, rebuy: 0, gain: 0, mult: 1 };
+		for (const option of options) {
+			// The bank must cover buying everything back in full, without counting on the refunds.
+			if (plan.cost + option.cost > cap || plan.rebuy + option.rebuy > spendable) continue;
+			plan.sales.push(option);
+			plan.sold += option.amount;
+			plan.cost += option.cost;
+			plan.rebuy += option.rebuy;
+			plan.gain += option.gain;
+		}
+		if (!plan.sales.length) return { wait: `a bigger bank: the cheapest combo costs ${Beautify(options[options.length - 1].cost)} cookies, and one may cost ${s.godzamokCapPercent}% of the bank` };
+		plan.mult = 1 + plan.sold * GODZAMOK_BONUS[level];
+		return plan;
+	}
+
+	// Sells each building type in the plan and buys it straight back. Returns true if anything was sold.
+	function makeCombo(plan) {
+		const bank = Game.cookies;
+		const earned = Game.cookiesEarned;
+		const savedMode = Game.buyMode;
+		const missing = [];
+		const labels = [];
+		withSoundsMuted(COMBO_SOUND, function () {
+			try {
+				for (const sale of plan.sales) {
+					const building = sale.building;
+					const had = building.amount;
+					building.sell(sale.amount);
+					// Object.buy() sells instead of buying while the store is in sell mode.
+					Game.buyMode = 1;
+					building.buy(had - building.amount);
+					Game.buyMode = savedMode;
+					labels.push(`${sale.amount} ${sale.amount === 1 ? building.single : building.plural}`);
+					if (building.amount !== had) {
+						missing.push(`${building.plural} (had ${had}, now ${building.amount})`);
+						break;
+					}
+				}
+			} finally {
+				Game.buyMode = savedMode;
+			}
+		});
+		// buy() redrew the store rows for buy mode; redraw the store for the player's mode.
+		if (savedMode !== 1) Game.storeToRefresh = 1;
+		const cost = bank - Game.cookies;
+		if (tracker.earned !== null) {
+			const gained = Game.cookiesEarned - earned;
+			if (gained > 0) {
+				addIncome(mod.income.run.gains, 'sales', gained);
+				tracker.booked += gained;
+			}
+			if (cost > 0) addIncome(mod.income.run.losses, 'combo', cost);
+		}
+		const buff = Game.buffs['Devastation'];
+		state.comboCount++;
+		const what = labels.length > 3 ? `${Beautify(plan.sold)} buildings of ${labels.length} types` : labels.join(', ');
+		state.comboLast = `sold and bought back ${what}: click power x${(buff ? buff.multClick : 1).toFixed(2)} for ${DEVASTATION_SECONDS} seconds, for ${Beautify(Math.max(0, cost))} cookies`;
+		debugLog('Godzamok combo:', state.comboLast);
+		if (missing.length) {
+			settings().godzamokCombo = false;
+			state.comboStopped = `Godzamok combos turned themselves off: after a combo the count of ${missing.join(', ')} was not what it had been. Check your buildings, then turn combos back on if you want them.`;
+			debugLog(state.comboStopped);
+			noteGameChanged();
+			renderMenuSection();
+		}
+		return true;
+	}
+
+	function runGodzamok(now) {
+		if (!settings().godzamokCombo || now < state.nextComboCheckAt) return false;
+		state.nextComboCheckAt = now + GODZAMOK_CHECK_INTERVAL_MS;
+		// Nothing is sold with an ascension on its way.
+		if (state.ascendPending || state.ascendTriggered) return false;
+		const plan = comboPlan();
+		return plan.sales ? makeCombo(plan) : false;
+	}
+
+	function godzamokRow() {
+		const s = settings();
+		const row = { tab: 'pantheon', name: 'Godzamok combos', dot: 'on', now: '', wait: '' };
+		if (!s.godzamokCombo) {
+			if (!state.comboStopped) return null;
+			return Object.assign(row, { dot: 'warn', now: state.comboStopped, wait: 'you to turn them back on' });
+		}
+		const plan = comboPlan();
+		const mode = s.godzamokMode === 'buffs' ? 'During click buffs only.' : 'Whenever it pays.';
+		if (plan.running) {
+			row.now = `Devastation: click power x${plan.running.multClick.toFixed(2)} for another ${Math.ceil(plan.running.time / Game.fps)} s.`;
+		} else if (plan.sales) {
+			row.now = `Selling and buying back ${plan.sold} buildings for click power x${plan.mult.toFixed(2)}.`;
+		} else {
+			row.now = mode;
+			row.dot = 'wait';
+			row.wait = plan.wait;
+		}
+		if (state.comboLast) row.now += ` ${state.comboCount} so far; last: ${state.comboLast}.`;
+		return row;
+	}
+
+	/* =====================================================================
 	   EXTRAS
 	   ===================================================================== */
 
@@ -3087,7 +3750,7 @@
 		none: { label: 'No payback period', legend: "the purchase doesn't raise your income, so it never pays for itself" },
 		utility: { label: 'Utility: bought when cheap', legend: 'no payback period, but useful (golden cookies, reindeer, wrinklers, prices, drops): bought once it costs less than the limit set above' },
 		research: { label: 'Bought by the research setting', legend: 'research, bought as soon as it is affordable while Buy research is on' },
-		skip: { label: 'Skipped by AFK Baker', legend: 'never bought: switches, vaulted upgrades, the never-buy list, and research while Buy research is off' },
+		skip: { label: 'Skipped by AFK Baker', legend: 'never bought: switches, vaulted upgrades, the never-buy list, research while Buy research is off, and research past your grandmapocalypse limit' },
 	};
 	const RATING_ORDER = ['best', 'close', 'average', 'poor', 'utility', 'none', 'research', 'skip'];
 	const SKIP_REASONS = {
@@ -3097,6 +3760,7 @@
 		'costs sugar lumps': 'it costs sugar lumps',
 		selector: 'it opens a selection, not a purchase',
 		'already bought': 'it is already bought',
+		'grandmapocalypse limit': 'it would take the grandmapocalypse past the stage you set',
 	};
 	const UPGRADE_BOXES = ['upgrades', 'techUpgrades', 'toggleUpgrades', 'vaultUpgrades'];
 
@@ -3624,6 +4288,15 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 #afkPanel .afk-aura-locked .crate{filter:grayscale(100%);opacity:0.45 !important;}
 #afkPanel .afk-aura-taken{opacity:0.3;cursor:not-allowed;}
 #afkPanel .afk-aura-level{position:absolute;left:-4px;right:-4px;bottom:-4px;z-index:20;text-align:center;font-size:10px;font-weight:bold;color:#fff;text-shadow:0px 0px 3px #000,0px 1px 1px #000;pointer-events:none;}
+#afkPanel .afk-stats-wrap{margin:4px 12px 8px;overflow-x:auto;}
+#afkPanel table.afk-stats{border-collapse:collapse;font-size:11px;line-height:1.35;}
+#afkPanel .afk-stats th,#afkPanel .afk-stats td{padding:3px 10px;text-align:right;white-space:nowrap;border-bottom:1px solid rgba(255,255,255,0.08);vertical-align:top;}
+#afkPanel .afk-stats th{color:#fff;font-weight:bold;}
+#afkPanel .afk-stats th small,#afkPanel .afk-stats td small{font-weight:normal;opacity:0.6;}
+#afkPanel .afk-stats td small{margin-left:4px;}
+#afkPanel .afk-stats th:first-child,#afkPanel .afk-stats td:first-child{text-align:left;position:sticky;left:0px;background:#0b0b0b;}
+#afkPanel .afk-stats td.afk-stats-live{color:#fff;}
+#afkPanel .afk-stats tr.afk-stats-section td{padding-top:10px;font-size:10px;text-transform:uppercase;letter-spacing:0.4px;color:rgba(255,255,255,0.6);border-bottom:1px solid rgba(255,255,255,0.25);}
 #tooltip .afk-tip{margin:0px 8px 8px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.2);font-size:11px;text-align:left;position:relative;}
 #tooltip .afk-tip-who{font-size:9px;text-transform:uppercase;letter-spacing:0.5px;opacity:0.55;}
 #tooltip .afk-tip-rating{font-size:13px;color:#fff;margin:2px 0px;}
@@ -4010,7 +4683,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 	// AFK Baker's own tabs, in order. Tabs registered by add-ons come after them.
 	const TABS = [
 		['dashboard', 'Dashboard'], ['clickers', 'Clickers'], ['autobuy', 'Auto-buy'], ['lumps', 'Sugar lumps'], ['dragon', 'Dragon'], ['pantheon', 'Pantheon'],
-		['market', 'Stock Market'], ['grimoire', 'Grimoire'], ['ascend', 'Auto-ascend'], ['extras', 'Extras'], ['other', 'Other'],
+		['market', 'Stock Market'], ['grimoire', 'Grimoire'], ['ascend', 'Auto-ascend'], ['stats', 'Stats'], ['other', 'Other'],
 	];
 
 	// A "?" that shows an explanation in the game's own tooltip when hovered.
@@ -4054,6 +4727,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			hint('A short line next to the AFK Baker tab, such as "Saving for 10x Fractal engine (2h 41m)", "Fast buying", "Paused" or "Auto-buy off". It changes at most once a second. Click it to open this tab.'));
 		if (s.autoBuy) {
 			html += listing(toggleButton('buyResearch', 'Buy research') + hint('Research upgrades advance the grandmapocalypse.')) +
+				(s.buyResearch ? listing(cycleButton('grandmaLimit', 'Stop the grandmapocalypse at') + hint(grandmaLimitTip())) : '') +
 				listing(toggleButton('elderPledge', 'Elder Pledge') +
 					hint('Pledging stops wrinklers from spawning. Never pledges in Feed mode or while a shiny wrinkler is on screen.'));
 		}
@@ -4168,17 +4842,20 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		if (draft.error) importHtml += listing(`<label style="color:#f66;">${escapeHtml(draft.error)}</label>`);
 		if (draft.preview) {
 			const changes = draft.preview.changes;
+			const runs = draft.preview.runs.length;
 			importHtml += listing(changes.length ?
 				`<label>Importing would change ${changes.length} setting${changes.length === 1 ? '' : 's'}:</label>` +
 					`<div class="afk-changes">${changes.map(function (change) { return `<div>${escapeHtml(change)}</div>`; }).join('')}</div>` :
-				'<label>These are the settings you already have. Nothing would change.</label>') +
-				listing((changes.length ? actionButton('import-apply', 'Apply these changes') : '') + actionButton('import-cancel', 'Cancel'));
+				'<label>These are the settings you already have. No setting would change.</label>') +
+				(runs ? listing(`<label>It also adds ${runs} past run${runs === 1 ? '' : 's'} to the Stats tab. Your own past runs are kept.</label>`) : '') +
+				listing((changes.length || runs ? actionButton('import-apply', 'Apply these changes') : '') + actionButton('import-cancel', 'Cancel'));
 		}
 		return listing(toggleButton('debug', 'Debug logging') +
 				hint('Extra console output, including the top auto-buy candidates and, if Cookie Monster is installed, a comparison of payback periods.')) +
+			extrasHtml() +
 			heading('Settings export') +
 			listing(`<textarea readonly id="afkExportText" rows="3" style="width:calc(100% - 20px);font-family:Consolas,monospace;font-size:11px;${FIELD_STYLE}">${escapeHtml(exportSettings())}</textarea>`) +
-			listing(actionButton('export-copy', state.exportCopied ? 'Copied' : 'Copy') + hint('The text holds every AFK Baker setting, including the sugar lump list.')) +
+			listing(actionButton('export-copy', state.exportCopied ? 'Copied' : 'Copy') + hint('The text holds every AFK Baker setting, including the sugar lump list, and the past runs of the Stats tab.')) +
 			heading('Settings import') + importHtml +
 			heading('About') +
 			listing(`<label>AFK Baker ${VERSION}. Extension hooks version ${ext.apiVersion}.</label>`);
@@ -4194,7 +4871,11 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		const notes = [];
 		const refusal = godRefusal(key);
 		if (refusal) notes.push(`AFK Baker won't slot Holobore while golden cookie clicking is on: ${refusal.replace(/^Holobore /, 'it ')}.`);
-		if (key === GODZAMOK) notes.push("Godzamok does nothing for AFK play: AFK Baker never sells buildings.");
+		if (key === GODZAMOK) {
+			notes.push(settings().godzamokCombo ?
+				'Godzamok combos are on: with him slotted, AFK Baker sells buildings and buys them straight back for the click power.' :
+				'Godzamok does nothing for AFK play unless you turn on Godzamok combos below: otherwise AFK Baker never sells buildings.');
+		}
 		if (notes.length) {
 			const note = '<div class="line"></div><div style="padding:4px 2px 0px;font-size:11px;color:#fc9;">' + notes.join('<br>') + '</div>';
 			html = html.replace(/<\/div>\s*$/, note + '</div>');
@@ -4210,13 +4891,28 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			`<div class="usesIcon shadowFilter templeIcon" style="background-position:${-icon[0] * 48}px ${-icon[1] * 48}px;"></div></div>`;
 	}
 
+	function godzamokHtml() {
+		const s = settings();
+		let html = heading('Godzamok combos') +
+			listing(toggleButton('godzamokCombo', 'Godzamok combos') +
+				hint('With Godzamok in a Pantheon slot, selling buildings gives Devastation: more click power for 10 seconds, 1% per building sold with him in the Diamond slot, half that in Ruby, a quarter in Jade. A combo sells whole building types and buys them straight back in the same instant, so your CpS never drops. It costs the gap between the refund and the price of buying back: about 71% of that price, less with the Earth Shatterer aura. AFK Baker makes one only when all of this holds: the autoclicker is on; Godzamok is slotted (it never slots him for this, and never changes auras for it); no Devastation is running, so one round per 10 seconds and no stacking; the extra click income expected is at least ' + GODZAMOK_MIN_RETURN + ' times the cost; and the bank above your cookie reserve covers buying everything back in full. It sells the types that give the most for their cost, several in one round while they fit under the limit below. Wizard towers are never sold, and one Grandma always stays, so wrinklers and an Elder Pledge are never affected. The first Grandma sold wins the achievement Just wrong, if you don\'t have it yet. If a building count ever comes back different, combos turn themselves off and the Dashboard says so. Off by default.'));
+		if (state.comboStopped) html += listing(`<label style="color:#f66;">${escapeHtml(state.comboStopped)}</label>`);
+		if (!s.godzamokCombo) return html;
+		return html +
+			listing(cycleButton('godzamokMode', 'When') +
+				hint('During click buffs only: a combo is made only while Click frenzy or Dragonflight is running, when a click is worth the most. Whenever it pays: also without one, whenever the expected gain is ' + GODZAMOK_MIN_RETURN + ' times the cost. Late in a run, when buildings cost next to nothing, that is every 10 seconds.')) +
+			listing(`<label>A combo may cost up to</label> ${numberInput('godzamokCapPercent', 40)}<label>% of the bank</label>` +
+				hint('Counted on the bank above the cookie reserve. It keeps combos from eating what auto-buy is saving up.')) +
+			listing('<label>Never sold: Wizard towers (their number sets the size of the magic meter). One Grandma always stays: selling the last one would pop every wrinkler and end an Elder Pledge. The dragon is never trained and no aura is changed in the same instant as a combo.</label>');
+	}
+
 	function pantheonTabHtml() {
 		const s = settings();
 		let html = listing(toggleButton('autoPantheon', 'Auto-Pantheon') +
 			hint('Each run, slots the gods picked below once the Pantheon is available, with the game\'s own slotting and one worship swap per god, as when you drag them yourself. Nothing happens if they are already in place. When swaps run short it fills Diamond first, then Ruby, then Jade, and a single swap that puts two picks in place comes first. A slot left empty here is never touched. It never refills swaps with sugar lumps.'));
 		const M = pantheon();
 		if (!M) {
-			return html + listing(`<label>The Pantheon isn't available: ${Game.ascensionMode === 1 ? "it doesn't run in a Born again run" : 'it unlocks when a Temple has a level (bought with a sugar lump)'}. The gods can be picked here once it is.</label>`);
+			return html + godzamokHtml() + listing(`<label>The Pantheon isn't available: ${Game.ascensionMode === 1 ? "it doesn't run in a Born again run" : 'it unlocks when a Temple has a level (bought with a sugar lump)'}. The gods can be picked here once it is.</label>`);
 		}
 		const picks = pantheonPicks(M);
 		const slots = [0, 1, 2].map(function (slot) {
@@ -4239,7 +4935,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			`<div class="afk-pantheon-info">${escapeHtml(swaps)}</div><div class="afk-pantheon-roster">${roster}</div></div>` +
 			listing('<label>Drag a god onto a slot, or click a god and then a slot. Drag a picked god off its slot, or use its &#10005;, to leave that slot alone.</label>');
 		if (s.clickGolden) html += listing('<label>Holobore is greyed out: it is thrown out of its slot, losing every worship swap, as soon as a golden cookie is clicked, and golden cookie clicking is on.</label>');
-		return html;
+		return html + godzamokHtml();
 	}
 
 	// Puts a god in a slot's pick. A god picked for another slot trades places with this slot's pick.
@@ -4376,16 +5072,14 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		return true;
 	}
 
-	/* ----- Extras tab ----- */
+	/* ----- RedFox and Sunder, in the Other tab ----- */
 
-	function extrasTabHtml() {
+	function extrasHtml() {
 		const s = settings();
-		return listing('<label>Just for fun, and all off by default.</label>') +
-			heading('RedFox') +
+		return heading('Just for fun') +
 			listing(toggleButton('redFox', 'RedFox') +
 				hint('Every "wrinkler" on screen reads "nibbler" instead, keeping capitals: Wrinkler becomes Nibbler, wrinklers become nibblers, Shiny wrinkler becomes Shiny nibbler, Wrinklerspawn becomes Nibblerspawn. Only the text you see changes. The names the game and AFK Baker use inside, and your save, stay as they are, and turning it off puts the original text back at once. Named after RedFox, who calls them nibblers.' +
 					(isGameInEnglish() ? '' : ' The game is not set to English, so there is nothing to change: RedFox only works in English.'))) +
-			heading('Sunder') +
 			listing(toggleButton('sunder', 'Sunder') +
 				(s.sunder ? `<label>pets per second</label> ${numberInput('sunderRate', 40)}` : '') +
 				hint('Pets Krumblor nonstop, from 1 to 30 times a second. The dragon panel stays open while it is on, which covers the lower left of the big cookie, and whatever panel was open before comes back when you turn it off. Regular auto-pet stands aside meanwhile. Pet sounds follow the mute setting. Each pet sends up a heart from Krumblor, as when you pet him yourself, if particles are on in the game\'s options. It needs the heavenly upgrade Pet the dragon and a hatched dragon. Named after Sunder, who wants Krumblor petted at all times.'));
@@ -4412,18 +5106,192 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		return { tab: 'pantheon', name: 'Pantheon', dot: wait ? 'wait' : 'on', now: now, wait: wait };
 	}
 
-	function extrasRow() {
+	function extrasRows() {
 		const s = settings();
-		if (!s.sunder && !s.redFox) return null;
-		const parts = [];
-		if (s.sunder) parts.push(state.sunderBlocked ? `Sunder can't pet: ${state.sunderBlocked}.` : `Sunder: petting Krumblor ${s.sunderRate} times a second (${Beautify(state.sunderPets)} pets so far).`);
-		if (s.redFox) parts.push(isGameInEnglish() ? 'RedFox: wrinklers read "nibblers".' : 'RedFox is on, but only works with the game in English.');
-		return { tab: 'extras', name: 'Extras', dot: s.sunder && state.sunderBlocked ? 'wait' : 'on', now: parts.join(' '), wait: '' };
+		const rows = [];
+		if (s.sunder) {
+			rows.push({ tab: 'other', name: 'Sunder', dot: state.sunderBlocked ? 'wait' : 'on',
+				now: state.sunderBlocked ? `Can't pet: ${state.sunderBlocked}.` : `Petting Krumblor ${s.sunderRate} times a second (${Beautify(state.sunderPets)} pets so far).`, wait: '' });
+		}
+		if (s.redFox) rows.push({ tab: 'other', name: 'RedFox', dot: 'on', now: isGameInEnglish() ? 'Wrinklers read "nibblers".' : 'On, but it only works with the game in English.', wait: '' });
+		return rows;
+	}
+
+	// Shown while a limit is set: where research stops, or what can be done once the grandmas are past it.
+	function grandmaRow() {
+		const s = settings();
+		const limit = GRANDMA_LIMIT_STAGE[s.grandmaLimit];
+		if (limit >= GRANDMA_STAGE_UPGRADES.length) return null;
+		const row = { tab: 'autobuy', name: 'Grandmapocalypse', dot: 'on', now: '', wait: '' };
+		const limitName = grandmaLimitName(s.grandmaLimit);
+		const mood = grandmaMood();
+		if (openedGrandmaStage() <= limit) {
+			row.now = `Limit: ${limitName}. Research stops before ${GRANDMA_STAGE_UPGRADES[limit]}. Grandmas now: ${mood}.`;
+			if (!s.buyResearch || !s.autoBuy) {
+				row.dot = 'off';
+				row.now += s.autoBuy ? ' Buy research is off, so no research is bought at all.' : ' Auto-buy is off, so no research is bought at all.';
+			}
+			return row;
+		}
+		const pledge = Game.Upgrades['Elder Pledge'];
+		const covenant = Game.Upgrades['Elder Covenant'];
+		const pledgeMinutes = Math.round(Game.getPledgeDuration() / Game.fps / 60);
+		const options = [
+			Game.Has('Elder Pact') ?
+				`an Elder Pledge (${Beautify(pledge.getPrice())} cookies) calms them for ${pledgeMinutes} minutes at a time and pops every wrinkler` :
+				'the Elder Pledge only comes with Elder Pact, so it is not on offer',
+			covenant.unlocked || covenant.bought ?
+				`the Elder Covenant (${Beautify(covenant.getPrice())} cookies) calms them for good at 5% less CpS` :
+				'the Elder Covenant, which calms them for good at 5% less CpS, appears after a first pledge',
+			'ascending starts research over',
+		];
+		row.now = `The research already bought takes the grandmas past your limit (${limitName}); they are now: ${mood}. ` +
+			`There is no way back to a stage in between. Your options: ${options.join('; ')}. AFK Baker buys none of these for this setting.`;
+		if (Game.Has('Elder Covenant')) return row;
+		if (Game.pledgeT > 0) {
+			row.dot = 'wait';
+			row.wait = `the pledge to run out (${formatDuration(Game.pledgeT / Game.fps * 1000)})`;
+			return row;
+		}
+		row.dot = 'warn';
+		row.wait = 'you to choose';
+		return row;
+	}
+
+	/* ----- Stats tab: this run and the past ones, side by side ----- */
+
+	function shareText(amount, total) {
+		if (!(total > 0)) return '';
+		const percent = amount / total * 100;
+		return percent > 0 && percent < 0.1 ? '&lt;0.1%' : percent.toFixed(1) + '%';
+	}
+
+	// One run's column: row key -> the cell's HTML, '' for a row the run has nothing in.
+	function recordCells(record) {
+		const cells = {};
+		let total = 0;
+		for (const category in record.gains) {
+			if (record.gains[category] > 0) total += record.gains[category];
+		}
+		const multiplier = incomeMultiplier(record);
+		cells.length = formatDuration(record.end - record.start);
+		cells.baked = Beautify(record.baked);
+		cells.growth = growthText(record);
+		cells.multiplier = multiplier === null ? '&ndash;' : 'x' + (multiplier < 100 ? multiplier.toFixed(2) : Beautify(Math.round(multiplier)));
+		cells.prestige = '+' + Beautify(record.prestige);
+		for (const category of INCOME_GAINS) {
+			const amount = record.gains[category[0]] || 0;
+			cells['g:' + category[0]] = amount > 0 ? `${shareText(amount, total)} <small>${Beautify(amount)}</small>` : '';
+		}
+		for (const category of INCOME_LOSSES) {
+			const amount = record.losses[category[0]] || 0;
+			cells['l:' + category[0]] = amount > 0 ? `${shareText(amount, total)} <small>${Beautify(amount)}</small>` : '';
+		}
+		const unaccounted = -(record.gains.other || 0);
+		cells['l:unaccounted'] = unaccounted > 0 ? `${shareText(unaccounted, total)} <small>${Beautify(unaccounted)}</small>` : '';
+		cells.bank = record.bank ? (record.bank > 0 ? '+' : '-') + Beautify(Math.abs(record.bank)) : '';
+		const setup = record.setup;
+		cells['s:auras'] = escapeHtml(setup.a.join(', ') || 'none');
+		cells['s:gods'] = escapeHtml(setup.g.length ? setup.g.join(', ') : 'none');
+		cells['s:grandmas'] = escapeHtml(setup.w || '?');
+		cells['s:clicks'] = setup.c > 0 ? setup.c + ' a second' : 'off';
+		cells['s:changed'] = record.changed ? `yes: this one held ${record.share}%` : 'no';
+		return cells;
+	}
+
+	// The table's rows: [key, label, explanation], or [null, section title]. A row with nothing in it
+	// in any run is left out, except the ones marked as always shown.
+	function statsRows() {
+		const rows = [
+			['length', 'Length', '', true],
+			['baked', 'Cookies baked', '', true],
+			['growth', 'Growth', 'How fast your all-time cookies grew: +20% an hour means that after each hour of the run you had baked a fifth more, over all your runs, than an hour before. That is what earns prestige, and it compares runs of very different size. Growth slows down as a game goes on, so compare runs that are close together. A first run has nothing to compare with.', true],
+			['multiplier', 'Income multiplier', 'Everything counted while the game ran, divided by what your buildings alone would have made at your CpS without buffs. x3.00 means clicks, golden cookies, buffs and wrinklers tripled it.', true],
+			['prestige', 'Prestige earned', '', true],
+			[null, 'Where the cookies came from (share of all gains)'],
+		];
+		INCOME_GAINS.forEach(function (category) { rows.push(['g:' + category[0], category[1], category[2]]); });
+		rows.push([null, 'Losses (against all gains)']);
+		INCOME_LOSSES.forEach(function (category) { rows.push(['l:' + category[0], category[1], category[2]]); });
+		rows.push(['l:unaccounted', 'Not accounted for', 'Cookies the count expected that the game did not bake. Small rounding differences end up here.']);
+		rows.push(['bank', 'Stock market, bank change', "Cookies the market took out of the bank and put back, sales minus purchases. Stock still held has been paid for and not yet sold."]);
+		rows.push([null, 'Setup (the one active longest)']);
+		rows.push(['s:auras', 'Dragon auras', '', true], ['s:gods', 'Pantheon', 'Diamond, Ruby and Jade slot.', true], ['s:grandmas', 'Grandmas', '', true],
+			['s:clicks', 'Autoclicker', '', true], ['s:changed', 'Changed during run', '', true]);
+		return rows;
+	}
+
+	function runDateText(record) {
+		return new Date(record.end).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+	}
+
+	function statsTableHtml() {
+		const counting = settings().trackIncome;
+		const history = mod.income.history;
+		const columns = (counting ? [recordCells(liveRecord())] : []).concat(history.map(recordCells));
+		if (!columns.length) return '';
+		let html = '<tr><th></th>' + (counting ? '<th>This run</th>' : '') +
+			history.map(function (record, i) { return `<th>${i + 1} run${i ? 's' : ''} ago<br><small>${escapeHtml(runDateText(record))}</small></th>`; }).join('') + '</tr>';
+		let section = '';
+		for (const row of statsRows()) {
+			if (row[0] === null) {
+				section = `<tr class="afk-stats-section"><td colspan="${columns.length + 1}">${row[1]}</td></tr>`;
+				continue;
+			}
+			if (!row[3] && !columns.some(function (cells) { return cells[row[0]]; })) continue;
+			html += section + `<tr><td>${row[1]}${row[2] ? hint(row[2]) : ''}</td>` + columns.map(function (cells, i) {
+				return `<td${counting && i === 0 ? ` class="afk-stats-live" data-afk-stat="${row[0]}"` : ''}>${cells[row[0]] || '&ndash;'}</td>`;
+			}).join('') + '</tr>';
+			section = '';
+		}
+		return `<div class="afk-stats-wrap"><table class="afk-stats" id="afkStats" data-afk-runs="${history.length}">${html}</table></div>`;
+	}
+
+	function statsTabHtml() {
+		const s = settings();
+		const history = mod.income.history;
+		let html = listing(toggleButton('trackIncome', 'Count where cookies come from') +
+			hint('Counts where this run\'s cookies come from, using only numbers the game shows: cookies baked, CpS with and without buffs, what wrinklers wither, cookies made by clicking. AFK Baker measures its own golden cookie clicks, casts, trades and wrinkler pops; what you click yourself, garden harvests and gifts land in Other. It costs a few additions per game tick. When you ascend, the run joins the table with the setup that was active longest. The last ' + INCOME_HISTORY_MAX + ' runs are kept in your save and in the settings export.'));
+		if (!s.trackIncome) html += listing('<label>Counting is off. Past runs are kept.</label>');
+		html += statsTableHtml();
+		if (s.trackIncome && !history.length) html += listing('<label>Past runs appear next to this one each time you ascend.</label>');
+		if (history.length) {
+			html += listing(actionButton('stats-clear', state.statsClearArmed ? 'Click again to forget them' : 'Forget past runs') +
+				hint('Removes the past runs from the table and from your save. This run keeps counting.'));
+		}
+		return html;
+	}
+
+	// The "This run" column moves all the time: its cells are rewritten in place. A row that isn't in
+	// the table yet (a first golden cookie, say) or a new past run means the table is drawn again.
+	function updateStatsTab() {
+		const table = document.getElementById('afkStats');
+		if (!table || !settings().trackIncome) return;
+		if (Number(table.dataset.afkRuns) !== mod.income.history.length) {
+			renderMenuSection();
+			return;
+		}
+		const cells = recordCells(liveRecord());
+		const shown = {};
+		table.querySelectorAll('[data-afk-stat]').forEach(function (cell) {
+			const key = cell.dataset.afkStat;
+			shown[key] = true;
+			const value = cells[key] || '&ndash;';
+			if (cell.dataset.afkValue === value) return;
+			cell.dataset.afkValue = value;
+			cell.innerHTML = value;
+		});
+		for (const key in cells) {
+			if (cells[key] && !shown[key]) {
+				renderMenuSection();
+				return;
+			}
+		}
 	}
 
 	const TAB_HTML = {
 		clickers: clickersTabHtml, autobuy: autobuyTabHtml, lumps: lumpsTabHtml, dragon: dragonTabHtml,
-		pantheon: pantheonTabHtml, market: marketTabHtml, grimoire: grimoireTabHtml, ascend: ascendTabHtml, extras: extrasTabHtml, other: otherTabHtml,
+		pantheon: pantheonTabHtml, market: marketTabHtml, grimoire: grimoireTabHtml, ascend: ascendTabHtml, stats: statsTabHtml, other: otherTabHtml,
 	};
 
 	/* ----- The dashboard: one row per feature ----- */
@@ -4597,10 +5465,11 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 	}
 
 	function dashboardRows() {
-		let rows = [clickerRow(), wrinklerRow(), autoBuyRow(), reserveRow(), lumpRow()]
-			.concat(dragonRows(), [pantheonRow()], marketRows(), [grimoireRow(), ascendRow()]);
-		const extras = extrasRow();
-		if (extras) rows.push(extras);
+		const grandmas = grandmaRow();
+		const godzamok = godzamokRow();
+		let rows = [clickerRow(), wrinklerRow(), autoBuyRow()].concat(grandmas ? [grandmas] : [], [reserveRow(), lumpRow()])
+			.concat(dragonRows(), [pantheonRow()], godzamok ? [godzamok] : [], marketRows(), [grimoireRow(), ascendRow()]);
+		rows = rows.concat(extrasRows());
 		ext.tabs.forEach(function (tab) {
 			const row = addOnRow(tab);
 			if (row) rows.push(row);
@@ -4636,8 +5505,8 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		return EXPORT_PREFIX + btoa(unescape(encodeURIComponent(mod.save())));
 	}
 
-	// The settings in an exported text, checked like a saved game's, or null if the text isn't one.
-	function importedSettings(text) {
+	// What an exported text holds, or null if the text isn't one.
+	function parseExport(text) {
 		const cleaned = String(text).replace(/\s+/g, '');
 		if (cleaned.indexOf(EXPORT_PREFIX) !== 0) return null;
 		let parsed;
@@ -4646,7 +5515,21 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		} catch (e) {
 			return null;
 		}
-		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+		return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+	}
+
+	// The past runs in an exported text that aren't in the Stats history yet. An import adds them and
+	// never removes one of the player's own.
+	function importedRuns(text) {
+		const parsed = parseExport(text);
+		const own = mod.income.history.map(function (record) { return record.start; });
+		return sanitizeHistory(parsed && parsed.income && parsed.income.history).filter(function (record) { return own.indexOf(record.start) === -1; });
+	}
+
+	// The settings in an exported text, checked like a saved game's, or null if the text isn't one.
+	function importedSettings(text) {
+		const parsed = parseExport(text);
+		if (!parsed) return null;
 		const imported = sanitizeSettings(parsed);
 		// An imported text must never be able to trigger an ascension.
 		imported.autoAscend = false;
@@ -4689,13 +5572,15 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			draft.error = 'That is not an AFK Baker settings text.';
 			return;
 		}
-		draft.preview = { settings: imported, changes: importChanges(imported) };
+		draft.preview = { settings: imported, changes: importChanges(imported), runs: importedRuns(draft.text) };
 	}
 
 	function applyImport() {
 		const draft = state.importDraft;
 		if (!draft.preview) return;
 		mod.settings = draft.preview.settings;
+		mod.income.history = mod.income.history.concat(draft.preview.runs)
+			.sort(function (a, b) { return b.end - a.end; }).slice(0, INCOME_HISTORY_MAX);
 		applyColors();
 		state.importDraft = { text: '', preview: null, error: '' };
 		state.ascendWarning = false;
@@ -4912,12 +5797,17 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			else if (action === 'import-check') checkImport();
 			else if (action === 'import-apply') applyImport();
 			else if (action === 'import-cancel') state.importDraft = { text: '', preview: null, error: '' };
+			else if (action === 'stats-clear') {
+				if (state.statsClearArmed) mod.income.history = [];
+				state.statsClearArmed = !state.statsClearArmed;
+			}
 		} else if (data.afkLump) {
 			editLumpPriority(data.afkLump, Number(data.index));
 		} else if (data.afkToggle) {
 			const key = data.afkToggle;
 			s[key] = !s[key];
 			if (key === 'autoAscend') onAutoAscendToggled();
+			if (key === 'godzamokCombo') state.comboStopped = '';
 		} else {
 			const key = data.afkCycle;
 			const options = Object.keys(CYCLE_OPTIONS[key]);
@@ -4925,6 +5815,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			if (key === 'ascendMode' || key === 'wrinklerMode') recheckAscendWarning();
 		}
 		if (!data.afkAction || data.afkAction !== 'export-copy') state.exportCopied = false;
+		if (data.afkAction !== 'stats-clear') state.statsClearArmed = false;
 		Game.tooltip.shouldHide = 1;
 		PlaySound('snd/tick.mp3');
 		renderMenuSection();
@@ -5276,6 +6167,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			document.getElementById('afkPanelLive').innerHTML = live;
 		}
 		if (state.panelTab === 'lumps') updateLumpList();
+		if (state.panelTab === 'stats') updateStatsTab();
 		// The aura lists show which auras are locked; redraw them when the dragon levels up, unless one is open.
 		if (state.panelTab === 'dragon' && Game.dragonLevel !== state.renderedDragonLevel) {
 			const focused = document.activeElement;

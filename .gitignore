@@ -11,3 +11,5 @@ Desktop.ini
 # Logs and scratch
 *.log
 node_modules/
+# Playwright CLI output (may contain credentials)
+.playwright-cli/
