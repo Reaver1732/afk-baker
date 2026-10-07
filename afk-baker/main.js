@@ -7,7 +7,7 @@
 	'use strict';
 
 	const MOD_ID = 'afk baker';
-	const VERSION = '2.0.0';
+	const VERSION = '2.1.0';
 	// Settings saved before a default changed are reset to the new default:
 	// v1 had auto-ascend on, v2 had Elder Pledge on, v3 had the Auto reserve.
 	const SETTINGS_VERSION = 4;
@@ -184,6 +184,7 @@
 		marketSellPercent: [1, 1000],
 		marketBankPercent: [0, 100],
 		officeMinutes: [0, MAX_DRAGON_TRAIN_MINUTES],
+		sunderRate: [1, 30],
 	};
 	const REINCARNATE_GRACE_MS = 3000;
 	const STATUS_REFRESH_MS = 500;
@@ -193,6 +194,20 @@
 	const DARK_COLOR_LUMINANCE = 0.3;
 	// The line under the news ticker that says what auto-buy is doing changes this often at most.
 	const BUY_LINE_REFRESH_MS = 1000;
+	// The Pantheon's slots, in the order the mod fills them.
+	const PANTHEON_SLOT_KEYS = ['pantheonDiamond', 'pantheonRuby', 'pantheonJade'];
+	const PANTHEON_SLOT_NAMES = ['Diamond', 'Ruby', 'Jade'];
+	// Keyed as in the Pantheon's M.gods.
+	const HOLOBORE = 'asceticism';
+	const GODZAMOK = 'ruin';
+	// How long a worship swap takes to come back with 0, 1 and 2 left (minigamePantheon.js, M.logic).
+	const PANTHEON_SWAP_MS = [16 * 3600000, 4 * 3600000, 3600000];
+	const PANTHEON_CHECK_INTERVAL_MS = 1000;
+	// The sounds of slotting a god (the game's drop: a tick and the spirit sound).
+	const PANTHEON_SOUND = /^snd\/(tick|spirit)\.mp3$/;
+	// Where "wrinkler" turns up on screen: tooltips, the menus, the news ticker, notifications, prompts,
+	// the dragon and Santa panel, and AFK Baker's own panel and tab.
+	const REDFOX_CONTAINERS = ['tooltip', 'menu', 'commentsText', 'notes', 'prompt', 'specialPopup', 'afkPanel', 'afkOpen'];
 	// What an exported settings text starts with.
 	const EXPORT_PREFIX = 'AFKB1:';
 	// Below this width the panel's dashboard stacks its columns.
@@ -210,7 +225,8 @@
 		storeOverlay: 'Show ratings in the store', autoHarvestLumps: 'Auto-harvest sugar lumps', autoSpendLumps: 'Auto-spend sugar lumps',
 		keepLumps: 'Lumps to keep', lumpPriority: 'Sugar lump priority list', autoTrainDragon: 'Auto-train dragon',
 		dragonTrainMinutes: 'Dragon training limit, minutes of CpS', dragonAura1: 'Primary aura', dragonAura2: 'Secondary aura',
-		autoPetDragon: 'Auto-pet dragon', autoTrade: 'Auto-trade stocks', marketStrategy: 'Stock strategy', marketBuyPercent: 'Buy at % of resting value',
+		autoPetDragon: 'Auto-pet dragon', autoPantheon: 'Auto-Pantheon', pantheonDiamond: 'Pantheon: Diamond slot', pantheonRuby: 'Pantheon: Ruby slot', pantheonJade: 'Pantheon: Jade slot',
+		redFox: 'RedFox', sunder: 'Sunder', sunderRate: 'Sunder: pets per second', autoTrade: 'Auto-trade stocks', marketStrategy: 'Stock strategy', marketBuyPercent: 'Buy at % of resting value',
 		marketSellPercent: 'Sell at % of resting value', marketBankPercent: '% of the bank the market may use', marketSellAtLoss: 'Sell at a loss',
 		autoBrokers: 'Hire brokers', autoOffice: 'Upgrade office', officeMinutes: 'Office upgrade limit, minutes of CpS', autoCast: 'Auto-cast spell',
 		grimoireSpell: 'Spell', autoAscend: 'Auto-ascend', ascendMode: 'Threshold type', ascendThreshold: 'Ascend threshold', debug: 'Debug logging',
@@ -245,6 +261,11 @@
 		dragonAura1: '',
 		dragonAura2: '',
 		autoPetDragon: false,
+		autoPantheon: false,
+		// Keys of M.gods; '' leaves the slot alone.
+		pantheonDiamond: '',
+		pantheonRuby: '',
+		pantheonJade: '',
 		autoTrade: false,
 		marketStrategy: 'restingGuide',
 		marketBuyPercent: 30,
@@ -259,6 +280,9 @@
 		autoAscend: false,
 		ascendMode: 'gained',
 		ascendThreshold: 1000,
+		redFox: false,
+		sunder: false,
+		sunderRate: 10,
 		debug: false,
 	};
 
@@ -339,6 +363,13 @@
 		// null until the player chooses: on, unless Cookie Monster is drawing its own store colors.
 		settings.storeOverlay = raw && typeof raw.storeOverlay === 'boolean' ? raw.storeOverlay : null;
 		settings.overlayColors = sanitizeColors(raw && raw.overlayColors);
+		// God keys are checked against the Pantheon when it is there; here only their form, and no god twice.
+		const seenGods = {};
+		for (const key of PANTHEON_SLOT_KEYS) {
+			const god = raw && raw[key];
+			settings[key] = typeof god === 'string' && /^[a-z]{1,20}$/.test(god) && !seenGods[god] ? god : '';
+			if (settings[key]) seenGods[god] = true;
+		}
 		if (!raw || typeof raw !== 'object') return settings;
 
 		for (const key in DEFAULTS) {
@@ -402,6 +433,14 @@
 		// The quarter-hour that has given its drop, or been petted enough without one.
 		petDoneWindow: '',
 		nextMarketCheckAt: 0,
+		nextPantheonCheckAt: 0,
+		lastPantheonAction: '',
+		godDrag: null, // a god being dragged in the Pantheon tab
+		godSelected: '', // a god clicked in the Pantheon tab, to be put in the next slot clicked
+		auraSlot: '', // the aura slot whose picker is open in the Dragon tab
+		sunder: null, // while Sunder pets: { restoreTab, owed, last }
+		sunderBlocked: '',
+		sunderPets: 0,
 		lastTrade: '',
 		lastMarketAction: '',
 		// Set once the auto-ascend threshold is met: the market only sells from then on.
@@ -560,6 +599,7 @@
 			runDragon(now);
 			runMarket(now);
 			runGrimoire(now);
+			runPantheon(now);
 			checkAutoAscend();
 			refreshStatusLine(now);
 		} catch (e) {
@@ -2227,14 +2267,28 @@
 		return `${date.getHours()}:${Math.floor(date.getMinutes() / 15)}`;
 	}
 
-	function petDragon() {
-		// Each pet throws a particle from the mouse pointer; leave that out for our own pets.
+	// Each pet throws a heart from the mouse pointer (when the game's particles option is on). Auto-pet
+	// leaves that out, since the pointer can be anywhere; with hearts, the pointer is placed over the
+	// dragon for the length of the pet, so the heart rises from Krumblor as when the player pets him.
+	function petDragon(hearts) {
+		const pic = hearts && Game.prefs.particles ? l('specialPic') : null;
 		const savedParticles = Game.prefs.particles;
-		Game.prefs.particles = 0;
+		const savedX = Game.mouseX;
+		const savedY = Game.mouseY;
+		if (pic) {
+			// The game's own mouse coordinates: page position, less the top bar, at the game's scale.
+			const box = pic.getBoundingClientRect();
+			Game.mouseX = (box.left + box.width / 2) / Game.scale;
+			Game.mouseY = (box.top + box.height / 2 - TopBarOffset) / Game.scale;
+		} else {
+			Game.prefs.particles = 0;
+		}
 		try {
 			withSoundsMuted(DRAGON_SOUND, function () { Game.ClickSpecialPic(); });
 		} finally {
 			Game.prefs.particles = savedParticles;
+			Game.mouseX = savedX;
+			Game.mouseY = savedY;
 		}
 	}
 
@@ -2250,6 +2304,11 @@
 	// each quarter-hour until a drop appears or enough pets have passed without one, then waits for the
 	// next quarter, and stops for good once all four drops are found.
 	function runAutoPet(now) {
+		// Sunder pets nonstop; regular auto-pet stands aside meanwhile.
+		if (settings().sunder) {
+			endPetSession();
+			return;
+		}
 		if (now < state.nextPetAt) return;
 		state.nextPetAt = now + PET_INTERVAL_MS;
 		const key = petWindowKey(new Date(now));
@@ -2296,6 +2355,7 @@
 	}
 
 	function runDragon(now) {
+		runSunder(now);
 		runAutoPet(now);
 		if (now < state.nextDragonCheckAt) return;
 		state.nextDragonCheckAt = now + DRAGON_CHECK_INTERVAL_MS;
@@ -2760,6 +2820,255 @@
 		state.ascendTriggered = true;
 		console.log(`${LOG_PREFIX} Auto-ascending: +${progress.gained} prestige (total ${progress.total}).`);
 		Game.Ascend(1);
+	}
+
+	/* =====================================================================
+	   PANTHEON (the Temple minigame, minigamePantheon.js)
+	   The player picks a god for each slot; each run the mod slots them. Every ascension the game empties
+	   the slots and refills the worship swaps to 3, and a swap is spent for each god put in a slot. Swaps
+	   come back one at a time: 1 hour after the last with 2 left, 4 hours with 1 left, 16 hours with none.
+	   The Pantheon needs a Temple level, not Temples owned, and doesn't run in a Born again run.
+	   ===================================================================== */
+
+	function pantheon() {
+		const temple = Game.Objects['Temple'];
+		return Game.ascensionMode !== 1 && Game.isMinigameReady(temple) ? temple.minigame : null;
+	}
+
+	// What the Pantheon is waiting for before anything can be slotted, or ''.
+	function pantheonBlockedReason() {
+		if (Game.ascensionMode === 1) return "a normal run: the Pantheon doesn't run in a Born again run";
+		if (Game.Objects['Temple'].level < 1) return 'a Temple level (bought with a sugar lump) to unlock the Pantheon';
+		if (!pantheon()) return 'the Pantheon to finish loading';
+		return '';
+	}
+
+	// Why the mod won't slot a god right now, or ''.
+	function godRefusal(key) {
+		if (key === HOLOBORE && settings().clickGolden) {
+			return 'Holobore is thrown out of its slot, and every worship swap is lost, as soon as a golden cookie is clicked, and golden cookie clicking is on';
+		}
+		return '';
+	}
+
+	function shortGodName(god) {
+		return god ? god.name.split(',')[0] : '';
+	}
+
+	// The picks, as { key, god } per slot (Diamond, Ruby, Jade), or null for a slot left alone.
+	function pantheonPicks(M) {
+		return PANTHEON_SLOT_KEYS.map(function (settingKey) {
+			const key = settings()[settingKey];
+			return key && M.gods[key] ? { key: key, god: M.gods[key] } : null;
+		});
+	}
+
+	// The one move that brings the slots closest to the picks: a single swap that puts two picks in place
+	// if there is one, otherwise the first slot that is wrong, Diamond first. null when nothing can be done.
+	function nextPantheonMove(M) {
+		const picks = pantheonPicks(M);
+		const usable = function (slot) { return picks[slot] && !godRefusal(picks[slot].key); };
+		const wrong = [0, 1, 2].filter(function (slot) { return usable(slot) && M.slot[slot] !== picks[slot].god.id; });
+		if (!wrong.length) return null;
+		for (const slot of wrong) {
+			const god = picks[slot].god;
+			const from = god.slot;
+			if (from !== -1 && usable(from) && M.slot[slot] === picks[from].god.id) return { god: god, slot: slot };
+		}
+		for (const slot of wrong) {
+			const god = picks[slot].god;
+			// A god sitting in a slot that is left alone stays where it is.
+			if (god.slot !== -1 && !usable(god.slot)) continue;
+			return { god: god, slot: slot };
+		}
+		return null;
+	}
+
+	// A pick that can't be put in place because its god sits in a slot that is left alone, as text, or ''.
+	function pantheonStuckNote(M) {
+		const picks = pantheonPicks(M);
+		for (let slot = 0; slot < 3; slot++) {
+			const pick = picks[slot];
+			if (!pick || godRefusal(pick.key) || M.slot[slot] === pick.god.id) continue;
+			const from = pick.god.slot;
+			if (from !== -1 && (!picks[from] || godRefusal(picks[from].key))) {
+				return `${shortGodName(pick.god)} is in the ${PANTHEON_SLOT_NAMES[from]} slot, which is left alone`;
+			}
+		}
+		return '';
+	}
+
+	// Slots a god the way the game's own drag and drop does: one worship swap, the god's tile moved in the
+	// minigame's screen (and the god it replaces moved to where this one came from), then M.slotGod.
+	function slotGodLikeGame(M, god, slot) {
+		withSoundsMuted(PANTHEON_SOUND, function () {
+			M.useSwap(1);
+			M.lastSwapT = 0;
+			const tile = l('templeGod' + god.id);
+			const previous = M.slot[slot];
+			if (previous !== -1) {
+				const previousTile = l('templeGod' + previous);
+				if (previousTile && god.slot !== -1) {
+					l('templeSlot' + god.slot).appendChild(previousTile);
+				} else if (previousTile) {
+					const placeholder = l('templeGodPlaceholder' + previous);
+					placeholder.parentNode.insertBefore(previousTile, placeholder);
+				}
+			}
+			if (tile) l('templeSlot' + slot).appendChild(tile);
+			const ownPlaceholder = l('templeGodPlaceholder' + god.id);
+			if (ownPlaceholder) ownPlaceholder.style.display = 'none';
+			M.slotGod(god, slot);
+			PlaySound('snd/tick.mp3');
+			PlaySound('snd/spirit.mp3', 0.5);
+		});
+	}
+
+	// Milliseconds until the next worship swap comes back.
+	function msToNextSwap(M) {
+		const wait = M.swaps === 0 ? PANTHEON_SWAP_MS[0] : M.swaps === 1 ? PANTHEON_SWAP_MS[1] : PANTHEON_SWAP_MS[2];
+		return Math.max(0, M.swapT + wait - Date.now());
+	}
+
+	function runPantheon(now) {
+		if (now < state.nextPantheonCheckAt) return;
+		state.nextPantheonCheckAt = now + PANTHEON_CHECK_INTERVAL_MS;
+		if (!settings().autoPantheon) return;
+		const M = pantheon();
+		if (!M || M.swaps < 1 || M.dragging) return;
+		const move = nextPantheonMove(M);
+		if (!move) return;
+		slotGodLikeGame(M, move.god, move.slot);
+		state.lastPantheonAction = `Slotted ${shortGodName(move.god)} in the ${PANTHEON_SLOT_NAMES[move.slot]} slot`;
+		debugLog(state.lastPantheonAction);
+		noteGameChanged();
+	}
+
+	/* =====================================================================
+	   EXTRAS
+	   ===================================================================== */
+
+	/* ----- Sunder: Krumblor petted at all times ----- */
+
+	// Why the dragon can't be petted right now, or ''.
+	function petBlockedReason() {
+		if (!Game.Has('Pet the dragon')) return 'it needs the heavenly upgrade "Pet the dragon"';
+		if (!hasDragonEgg() || Game.dragonLevel < 4) return 'the dragon has to hatch first (level 4)';
+		return '';
+	}
+
+	function endSunder() {
+		const session = state.sunder;
+		if (!session) return;
+		state.sunder = null;
+		if (Game.specialTab !== session.restoreTab) showSpecialPanel(session.restoreTab);
+	}
+
+	// Keeps the dragon panel open and pets at the set rate: at most one pet per logic tick (30 a second).
+	function runSunder(now) {
+		const s = settings();
+		if (!s.sunder) {
+			endSunder();
+			return;
+		}
+		state.sunderBlocked = petBlockedReason();
+		if (state.sunderBlocked) {
+			endSunder();
+			return;
+		}
+		let session = state.sunder;
+		if (!session) session = state.sunder = { restoreTab: Game.specialTab, owed: 0, last: now };
+		if (Game.specialTab !== 'dragon' || !l('specialPic')) showSpecialPanel('dragon');
+		session.owed = Math.min(1, session.owed + Math.max(0, now - session.last) / 1000 * s.sunderRate);
+		session.last = now;
+		if (session.owed < 1) return;
+		session.owed -= 1;
+		petDragon(true);
+		state.sunderPets++;
+	}
+
+	/* ----- RedFox: wrinklers shown as nibblers ----- */
+
+	// Only text on screen is rewritten, inside the places where the word turns up. Names the game and
+	// AFK Baker use inside, and the save, are never touched, and every rewritten text node keeps its
+	// original so turning RedFox off puts it back.
+	const redFox = { observers: [], replaced: new Set(), originals: new WeakMap(), on: false, ms: 0, calls: 0 };
+
+	function isGameInEnglish() {
+		return typeof EN === 'undefined' || !!EN;
+	}
+
+	function nibble(text) {
+		return text.replace(/wrinkler/gi, function (word) {
+			if (word === 'WRINKLER') return 'NIBBLER';
+			return word.charAt(0) === 'W' ? 'Nibbler' : 'nibbler';
+		});
+	}
+
+	function redFoxText(node) {
+		const text = node.data;
+		if (!text || (text.indexOf('rinkler') === -1 && text.indexOf('RINKLER') === -1)) return;
+		const changed = nibble(text);
+		if (changed === text) return;
+		redFox.originals.set(node, text);
+		redFox.replaced.add(node);
+		node.data = changed;
+	}
+
+	function redFoxSweep(root) {
+		if (root.nodeType === 3) {
+			redFoxText(root);
+			return;
+		}
+		if (root.nodeType !== 1) return;
+		const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+		for (let node = walker.nextNode(); node; node = walker.nextNode()) redFoxText(node);
+	}
+
+	function onRedFoxMutations(records) {
+		const start = performance.now();
+		for (const record of records) {
+			if (record.type === 'characterData') redFoxText(record.target);
+			else for (const node of record.addedNodes) redFoxSweep(node);
+		}
+		redFox.ms += performance.now() - start;
+		redFox.calls++;
+	}
+
+	function startRedFox() {
+		redFox.on = true;
+		for (const id of REDFOX_CONTAINERS) {
+			const element = document.getElementById(id);
+			if (!element) continue;
+			const observer = new MutationObserver(onRedFoxMutations);
+			observer.observe(element, { childList: true, subtree: true, characterData: true });
+			redFox.observers.push(observer);
+			redFoxSweep(element);
+		}
+	}
+
+	function stopRedFox() {
+		redFox.on = false;
+		for (const observer of redFox.observers) observer.disconnect();
+		redFox.observers = [];
+		redFox.replaced.forEach(function (node) {
+			const original = redFox.originals.get(node);
+			// Only text that is still our rewrite goes back; anything the game has redrawn since is already right.
+			if (original !== undefined && node.data === nibble(original)) node.data = original;
+		});
+		redFox.replaced.clear();
+	}
+
+	function refreshRedFox() {
+		const wanted = !!settings().redFox && typeof MutationObserver !== 'undefined';
+		// The panel and its tab are built after the mod loads; watch them as soon as they are there.
+		if (wanted && redFox.on && redFox.observers.length < REDFOX_CONTAINERS.filter(function (id) { return document.getElementById(id); }).length) stopRedFox();
+		if (wanted && !redFox.on) startRedFox();
+		else if (!wanted && redFox.on) stopRedFox();
+		else if (redFox.replaced.size > 2000) {
+			// Text nodes the game threw away are forgotten.
+			redFox.replaced.forEach(function (node) { if (!node.isConnected) redFox.replaced.delete(node); });
+		}
 	}
 
 	/* =====================================================================
@@ -3289,6 +3598,32 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 #afkBuyLine:hover{color:#fff;text-decoration:underline;}
 #afkBuyLine:empty{display:none;}
 #afkPanel input.afk-color{width:26px;height:16px;padding:0px;margin:0px;border:1px solid #777;background:#000;cursor:pointer;vertical-align:middle;}
+#afkPanel .afk-pantheon{position:relative;margin:4px 12px 8px;padding:10px 8px 8px;text-align:center;border-radius:4px;background:url(img/shadedBorders.png),url(img/BGpantheon.jpg);background-size:100% 100%,auto;}
+#afkPanel .afk-pantheon-slots{display:flex;justify-content:center;flex-wrap:wrap;margin-bottom:4px;}
+#afkPanel .afk-pslot-wrap{display:flex;flex-direction:column;align-items:center;width:96px;margin:0px 6px 6px;position:relative;}
+#afkPanel .afk-pslot-wrap .afk-mini{position:absolute;right:4px;top:0px;}
+#afkPanel .afk-pslot.afk-pslot-hover{filter:brightness(1.4);}
+#afkPanel .afk-pslot .afk-god{position:absolute;left:0px;top:0px;margin:0px;}
+#afkPanel .afk-pslot-label{font-size:11px;line-height:1.3;margin-top:4px;color:#fff;text-shadow:0px 1px 2px #000,0px 0px 4px #000;}
+#afkPanel .afk-pslot-label small{opacity:0.75;}
+#afkPanel .afk-pantheon-info{display:inline-block;margin:2px auto 6px;padding:4px 14px;font-size:11px;color:rgba(255,255,255,0.8);background:rgba(0,0,0,0.75);border-radius:12px;}
+#afkPanel .afk-pantheon-roster{text-align:center;}
+#afkPanel .afk-pantheon-roster .afk-god{margin:3px;}
+#afkPanel .afk-god{touch-action:none;}
+#afkPanel .afk-god-picked{opacity:0.45;}
+#afkPanel .afk-god-refused{filter:grayscale(100%);opacity:0.4;}
+#afkPanel .afk-god-selected{outline:2px solid #ffd84a;}
+.afk-god-ghost{position:fixed;left:0px;top:0px;z-index:100000000;pointer-events:none;opacity:0.9;}
+#afkPanel .afk-aura-slots{display:flex;flex-wrap:wrap;padding:4px 12px;}
+#afkPanel .afk-aura-slot{display:flex;align-items:center;margin:2px 4px;padding:6px 12px 6px 10px;border:1px solid rgba(255,255,255,0.2);border-radius:4px;cursor:pointer;flex:1 1 180px;min-width:0px;max-width:280px;box-sizing:border-box;}
+#afkPanel .afk-aura-slot:hover,#afkPanel .afk-aura-slot.afk-selected{border-color:#ece2b6;background:rgba(255,255,255,0.06);}
+#afkPanel .afk-aura-slot .crate{float:none;margin:0px 12px 0px 0px;flex:0 0 auto;}
+#afkPanel .afk-aura-slot-text{line-height:1.4;}
+#afkPanel .afk-aura-grid{display:flex;flex-wrap:wrap;padding:6px 14px;}
+#afkPanel .afk-aura{position:relative;cursor:pointer;margin:6px;}
+#afkPanel .afk-aura-locked .crate{filter:grayscale(100%);opacity:0.45 !important;}
+#afkPanel .afk-aura-taken{opacity:0.3;cursor:not-allowed;}
+#afkPanel .afk-aura-level{position:absolute;left:-4px;right:-4px;bottom:-4px;z-index:20;text-align:center;font-size:10px;font-weight:bold;color:#fff;text-shadow:0px 0px 3px #000,0px 1px 1px #000;pointer-events:none;}
 #tooltip .afk-tip{margin:0px 8px 8px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.2);font-size:11px;text-align:left;position:relative;}
 #tooltip .afk-tip-who{font-size:9px;text-transform:uppercase;letter-spacing:0.5px;opacity:0.55;}
 #tooltip .afk-tip-rating{font-size:13px;color:#fff;margin:2px 0px;}
@@ -3312,25 +3647,6 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 	// The threshold in the game's own number format, to check the digits against.
 	function thresholdReadable(value) {
 		return Number.isFinite(value) ? `= ${Beautify(value)}` : 'not a number, the old value is kept';
-	}
-
-	// Every aura can be picked, locked ones too: the dragon resets on each ascension, and a pick is set
-	// as soon as the dragon reaches its level again.
-	function auraSelect(key) {
-		const s = settings();
-		const other = key === 'dragonAura1' ? s.dragonAura2 : s.dragonAura1;
-		let options = `<option value=""${s[key] ? '' : ' selected'}>None (leave it alone)</option>`;
-		for (const index in Game.dragonAuras) {
-			const aura = Game.dragonAuras[index];
-			if (aura.id === 0) continue;
-			const locked = Game.dragonLevel < auraUnlockLevel(aura.id);
-			options += `<option value="${escapeHtml(aura.name)}"` +
-				(aura.name === s[key] ? ' selected' : '') +
-				(aura.name === other ? ' disabled' : '') +
-				(locked ? ' style="color:#777;"' : '') + '>' +
-				escapeHtml(aura.name) + (locked ? ` (unlocks at level ${auraUnlockLevel(aura.id)})` : '') + '</option>';
-		}
-		return `<select data-afk-select="${key}" style="${FIELD_STYLE}">${options}</select>`;
 	}
 
 	function lumpButton(action, index, label, title) {
@@ -3693,8 +4009,8 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 
 	// AFK Baker's own tabs, in order. Tabs registered by add-ons come after them.
 	const TABS = [
-		['dashboard', 'Dashboard'], ['clickers', 'Clickers'], ['autobuy', 'Auto-buy'], ['lumps', 'Sugar lumps'], ['dragon', 'Dragon'],
-		['market', 'Stock Market'], ['grimoire', 'Grimoire'], ['ascend', 'Auto-ascend'], ['other', 'Other'],
+		['dashboard', 'Dashboard'], ['clickers', 'Clickers'], ['autobuy', 'Auto-buy'], ['lumps', 'Sugar lumps'], ['dragon', 'Dragon'], ['pantheon', 'Pantheon'],
+		['market', 'Stock Market'], ['grimoire', 'Grimoire'], ['ascend', 'Auto-ascend'], ['extras', 'Extras'], ['other', 'Other'],
 	];
 
 	// A "?" that shows an explanation in the game's own tooltip when hovered.
@@ -3794,9 +4110,8 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 				hint('For sacrifice steps the cost is what it takes to buy any missing buildings plus rebuy everything sacrificed, at unbuffed CpS.'));
 		}
 		return html +
-			listing(`<label>Primary aura</label> ${auraSelect('dragonAura1')}`) +
-			listing(`<label>Secondary aura</label> ${auraSelect('dragonAura2')}` +
-				hint('The second slot is used once the dragon is fully trained. Greyed auras are locked right now and are set when the dragon reaches that level. Setting an aura costs one of your highest building. An aura already in either slot is never moved.')) +
+			auraPickerHtml() +
+			listing('<label>The secondary aura is used once the dragon is fully trained. Setting an aura costs one of your highest building; an aura already in either slot is never moved, so the same pair in either order costs nothing.</label>') +
 			listing(toggleButton('autoPetDragon', 'Auto-pet dragon') +
 				hint('Opens the dragon panel to pet until all four drops are found, then buys Dragon fang and Dragon teddy bear. Needs the heavenly upgrade Pet the dragon.'));
 	}
@@ -3869,9 +4184,246 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			listing(`<label>AFK Baker ${VERSION}. Extension hooks version ${ext.apiVersion}.</label>`);
 	}
 
+	/* ----- Pantheon tab: a near-copy of the game's Pantheon screen ----- */
+
+	// The game's god tooltip, with a line of AFK Baker's own added where it has something to say.
+	function godTooltipFor(key) {
+		const M = pantheon();
+		if (!M || !M.gods[key]) return '';
+		let html = M.godTooltip(M.gods[key].id)();
+		const notes = [];
+		const refusal = godRefusal(key);
+		if (refusal) notes.push(`AFK Baker won't slot Holobore while golden cookie clicking is on: ${refusal.replace(/^Holobore /, 'it ')}.`);
+		if (key === GODZAMOK) notes.push("Godzamok does nothing for AFK play: AFK Baker never sells buildings.");
+		if (notes.length) {
+			const note = '<div class="line"></div><div style="padding:4px 2px 0px;font-size:11px;color:#fc9;">' + notes.join('<br>') + '</div>';
+			html = html.replace(/<\/div>\s*$/, note + '</div>');
+		}
+		return html;
+	}
+
+	function godTileHtml(key, god, extraClass) {
+		const icon = god.icon || [0, 0];
+		const refused = godRefusal(key) ? ' afk-god-refused' : '';
+		return `<div class="ready templeGod templeGod${god.id % 4} titleFont afk-god${refused}${extraClass || ''}${state.godSelected === key ? ' afk-god-selected' : ''}" data-afk-god="${key}" ` +
+			Game.getDynamicTooltip(`Game.mods['afk baker'].godTip('${key}')`, 'this') + '>' +
+			`<div class="usesIcon shadowFilter templeIcon" style="background-position:${-icon[0] * 48}px ${-icon[1] * 48}px;"></div></div>`;
+	}
+
+	function pantheonTabHtml() {
+		const s = settings();
+		let html = listing(toggleButton('autoPantheon', 'Auto-Pantheon') +
+			hint('Each run, slots the gods picked below once the Pantheon is available, with the game\'s own slotting and one worship swap per god, as when you drag them yourself. Nothing happens if they are already in place. When swaps run short it fills Diamond first, then Ruby, then Jade, and a single swap that puts two picks in place comes first. A slot left empty here is never touched. It never refills swaps with sugar lumps.'));
+		const M = pantheon();
+		if (!M) {
+			return html + listing(`<label>The Pantheon isn't available: ${Game.ascensionMode === 1 ? "it doesn't run in a Born again run" : 'it unlocks when a Temple has a level (bought with a sugar lump)'}. The gods can be picked here once it is.</label>`);
+		}
+		const picks = pantheonPicks(M);
+		const slots = [0, 1, 2].map(function (slot) {
+			const pick = picks[slot];
+			const now = M.slot[slot] !== -1 ? shortGodName(M.godsById[M.slot[slot]]) : 'empty';
+			return '<div class="afk-pslot-wrap">' +
+				`<div class="ready templeGod templeGod${slot % 4} templeSlot titleFont afk-pslot\" data-afk-pslot="${slot}">` +
+				`<div class="usesIcon shadowFilter templeGem templeGem${slot + 1}"></div>` +
+				(pick ? godTileHtml(pick.key, pick.god, ' afk-god-in-slot') : '') + '</div>' +
+				`<div class="afk-pslot-label"><b>${PANTHEON_SLOT_NAMES[slot]}</b><br>${pick ? escapeHtml(shortGodName(pick.god)) : 'left alone'}<br><small>now: ${escapeHtml(now)}</small></div>` +
+				(pick ? `<a class="smallFancyButton option afk-mini" data-afk-pslot-clear="${slot}" title="Leave this slot alone">&#10005;</a>` : '') +
+				'</div>';
+		}).join('');
+		const pickedKeys = picks.filter(Boolean).map(function (pick) { return pick.key; });
+		const roster = Object.keys(M.gods).map(function (key) {
+			return godTileHtml(key, M.gods[key], pickedKeys.indexOf(key) !== -1 ? ' afk-god-picked' : '');
+		}).join('');
+		const swaps = `Worship swaps: ${M.swaps}/3` + (M.swaps < 3 ? `, next in ${shortTime(msToNextSwap(M) / 1000)}` : '');
+		html += `<div class="afk-pantheon" id="afkPantheon"><div class="afk-pantheon-slots">${slots}</div>` +
+			`<div class="afk-pantheon-info">${escapeHtml(swaps)}</div><div class="afk-pantheon-roster">${roster}</div></div>` +
+			listing('<label>Drag a god onto a slot, or click a god and then a slot. Drag a picked god off its slot, or use its &#10005;, to leave that slot alone.</label>');
+		if (s.clickGolden) html += listing('<label>Holobore is greyed out: it is thrown out of its slot, losing every worship swap, as soon as a golden cookie is clicked, and golden cookie clicking is on.</label>');
+		return html;
+	}
+
+	// Puts a god in a slot's pick. A god picked for another slot trades places with this slot's pick.
+	function setPantheonPick(slot, key) {
+		const s = settings();
+		const target = PANTHEON_SLOT_KEYS[slot];
+		const previous = s[target];
+		PANTHEON_SLOT_KEYS.forEach(function (other) {
+			if (other !== target && s[other] === key) s[other] = previous;
+		});
+		s[target] = key;
+		state.godSelected = '';
+	}
+
+	function clearPantheonPick(slot) {
+		settings()[PANTHEON_SLOT_KEYS[slot]] = '';
+	}
+
+	// Dragging a god, with the pointer, in the Pantheon tab.
+	function onGodPointerDown(event) {
+		const tile = event.target.closest('[data-afk-god]');
+		if (!tile || event.button !== 0 || state.godDrag) return;
+		event.preventDefault();
+		const fromSlot = tile.closest('[data-afk-pslot]');
+		state.godDrag = { key: tile.dataset.afkGod, fromSlot: fromSlot ? Number(fromSlot.dataset.afkPslot) : -1, startX: event.clientX, startY: event.clientY, active: false, ghost: null, pointerId: event.pointerId };
+		window.addEventListener('pointermove', onGodPointerMove, true);
+		window.addEventListener('pointerup', onGodPointerUp, true);
+		window.addEventListener('pointercancel', endGodDrag, true);
+	}
+
+	function onGodPointerMove(event) {
+		const drag = state.godDrag;
+		if (!drag || event.pointerId !== drag.pointerId) return;
+		if (!drag.active) {
+			if (Math.abs(event.clientX - drag.startX) + Math.abs(event.clientY - drag.startY) < DRAG_THRESHOLD_PX) return;
+			drag.active = true;
+			Game.tooltip.shouldHide = 1;
+			const source = document.querySelector(`#afkPantheon [data-afk-god="${drag.key}"]`);
+			const ghost = source.cloneNode(true);
+			ghost.removeAttribute('onmouseover');
+			ghost.removeAttribute('onmouseout');
+			ghost.classList.add('afk-god-ghost');
+			document.body.appendChild(ghost);
+			drag.ghost = ghost;
+		}
+		drag.ghost.style.transform = `translate(${event.clientX - 30}px, ${event.clientY - 37}px)`;
+		const under = document.elementFromPoint(event.clientX, event.clientY);
+		document.querySelectorAll('#afkPantheon .afk-pslot').forEach(function (slot) {
+			slot.classList.toggle('afk-pslot-hover', !!under && slot.contains(under));
+		});
+	}
+
+	function onGodPointerUp(event) {
+		const drag = state.godDrag;
+		if (!drag || event.pointerId !== drag.pointerId) return;
+		if (drag.active) {
+			swallowNextClick();
+			if (drag.ghost) drag.ghost.style.display = 'none';
+			const under = document.elementFromPoint(event.clientX, event.clientY);
+			const slot = under && under.closest('[data-afk-pslot]');
+			if (slot) setPantheonPick(Number(slot.dataset.afkPslot), drag.key);
+			else if (drag.fromSlot !== -1) clearPantheonPick(drag.fromSlot);
+			PlaySound('snd/tick.mp3');
+		}
+		endGodDrag();
+		if (drag.active) renderMenuSection();
+	}
+
+	function endGodDrag() {
+		const drag = state.godDrag;
+		if (!drag) return;
+		window.removeEventListener('pointermove', onGodPointerMove, true);
+		window.removeEventListener('pointerup', onGodPointerUp, true);
+		window.removeEventListener('pointercancel', endGodDrag, true);
+		if (drag.ghost) drag.ghost.remove();
+		state.godDrag = null;
+	}
+
+	/* ----- Dragon tab: the aura picker ----- */
+
+	function auraTooltip(id, slotKey) {
+		const aura = Game.dragonAuras[id];
+		const s = settings();
+		const other = slotKey === 'dragonAura1' ? s.dragonAura2 : s.dragonAura1;
+		let note = '';
+		if (id > 0 && Game.dragonLevel < auraUnlockLevel(id)) note = `Unlocks at dragon level ${auraUnlockLevel(id)}. It can be picked now and is set once the dragon gets there.`;
+		if (id > 0 && aura.name === other) note = "It is the other slot's pick.";
+		const text = id === 0 ? 'Leave this slot alone: AFK Baker never changes it.' : aura.desc;
+		return `<div style="min-width:220px;max-width:300px;padding:8px;text-align:center;"><div class="icon" style="float:left;margin:-4px 4px 0px -4px;${writeIcon(aura.pic)}"></div>` +
+			`<div class="name">${id === 0 ? 'None (leave it alone)' : (aura.dname || aura.name)}</div><div class="line"></div><div class="description">${text}` +
+			(note ? `<div style="margin-top:6px;font-size:11px;color:#fc9;">${note}</div>` : '') + '</div></div>';
+	}
+
+	// Two slots like the game's aura buttons; clicking one opens a grid of every aura, as in the game's
+	// picker, but with the locked ones shown greyed with their level. Picking costs nothing: it only says
+	// which aura AFK Baker sets once the dragon allows it.
+	function auraPickerHtml() {
+		const s = settings();
+		const slotBox = function (key, label) {
+			const name = s[key];
+			const id = name ? auraId(name) : 0;
+			return `<div class="afk-aura-slot${state.auraSlot === key ? ' afk-selected' : ''}" data-afk-aura-slot="${key}">` +
+				`<div class="crate enabled afk-aura-icon" style="${writeIcon(Game.dragonAuras[id].pic)}"></div>` +
+				`<div class="afk-aura-slot-text"><b>${label}</b><br>${name ? escapeHtml(name) : 'None (leave it alone)'}</div></div>`;
+		};
+		let html = `<div class="afk-aura-slots">${slotBox('dragonAura1', 'Primary aura')}${slotBox('dragonAura2', 'Secondary aura')}</div>`;
+		const key = state.auraSlot;
+		if (!key) return html + listing('<label>Click a slot to pick its aura.</label>');
+		const other = key === 'dragonAura1' ? s.dragonAura2 : s.dragonAura1;
+		const current = s[key] ? auraId(s[key]) : 0;
+		let grid = '';
+		for (const index in Game.dragonAuras) {
+			const id = Number(index);
+			const aura = Game.dragonAuras[id];
+			const locked = id > 0 && Game.dragonLevel < auraUnlockLevel(id);
+			const taken = id > 0 && aura.name === other;
+			grid += `<div class="afk-aura${locked ? ' afk-aura-locked' : ''}${taken ? ' afk-aura-taken' : ''}${id === current ? ' afk-aura-current' : ''}" data-afk-aura="${id}" ` +
+				Game.getDynamicTooltip(`Game.mods['afk baker'].auraTip(${id},'${key}')`, 'this') + '>' +
+				`<div class="crate enabled${id === current ? ' highlighted' : ''}" style="opacity:1;float:none;margin:0px;${writeIcon(aura.pic)}"></div>` +
+				(locked ? `<div class="afk-aura-level">Lv ${auraUnlockLevel(id)}</div>` : '') + '</div>';
+		}
+		return html + `<div class="afk-aura-grid">${grid}</div>` +
+			listing(`<label>${key === 'dragonAura1' ? 'Primary' : 'Secondary'} aura: click one to pick it. Greyed ones are locked right now and are set once the dragon reaches their level. The other slot's pick can't be chosen twice.</label>`);
+	}
+
+	// An aura picked in the grid: '' (id 0) leaves the slot alone, and the same aura can't be in both.
+	function pickAura(key, id) {
+		const s = settings();
+		const other = key === 'dragonAura1' ? s.dragonAura2 : s.dragonAura1;
+		const name = id > 0 && Game.dragonAuras[id] ? Game.dragonAuras[id].name : '';
+		if (name && (!isAuraName(name) || name === other)) return false;
+		s[key] = name;
+		state.auraSlot = '';
+		return true;
+	}
+
+	/* ----- Extras tab ----- */
+
+	function extrasTabHtml() {
+		const s = settings();
+		return listing('<label>Just for fun, and all off by default.</label>') +
+			heading('RedFox') +
+			listing(toggleButton('redFox', 'RedFox') +
+				hint('Every "wrinkler" on screen reads "nibbler" instead, keeping capitals: Wrinkler becomes Nibbler, wrinklers become nibblers, Shiny wrinkler becomes Shiny nibbler, Wrinklerspawn becomes Nibblerspawn. Only the text you see changes. The names the game and AFK Baker use inside, and your save, stay as they are, and turning it off puts the original text back at once. Named after RedFox, who calls them nibblers.' +
+					(isGameInEnglish() ? '' : ' The game is not set to English, so there is nothing to change: RedFox only works in English.'))) +
+			heading('Sunder') +
+			listing(toggleButton('sunder', 'Sunder') +
+				(s.sunder ? `<label>pets per second</label> ${numberInput('sunderRate', 40)}` : '') +
+				hint('Pets Krumblor nonstop, from 1 to 30 times a second. The dragon panel stays open while it is on, which covers the lower left of the big cookie, and whatever panel was open before comes back when you turn it off. Regular auto-pet stands aside meanwhile. Pet sounds follow the mute setting. Each pet sends up a heart from Krumblor, as when you pet him yourself, if particles are on in the game\'s options. It needs the heavenly upgrade Pet the dragon and a hatched dragon. Named after Sunder, who wants Krumblor petted at all times.'));
+	}
+
+	function pantheonRow() {
+		const s = settings();
+		if (!s.autoPantheon) return { tab: 'pantheon', name: 'Pantheon', dot: 'off', now: 'Auto-Pantheon off.', wait: '' };
+		const blocked = pantheonBlockedReason();
+		const M = pantheon();
+		const pickNames = PANTHEON_SLOT_KEYS.map(function (key, slot) {
+			const god = M && s[key] ? M.gods[s[key]] : null;
+			return `${PANTHEON_SLOT_NAMES[slot]} ${god ? shortGodName(god) : (s[key] ? s[key] : '-')}`;
+		}).join(', ');
+		if (blocked) return { tab: 'pantheon', name: 'Pantheon', dot: 'wait', now: `Picked: ${pickNames}.`, wait: blocked };
+		const slotted = [0, 1, 2].map(function (slot) { return M.slot[slot] !== -1 ? shortGodName(M.godsById[M.slot[slot]]) : 'empty'; }).join(', ');
+		let now = `Picked: ${pickNames}. Slotted: ${slotted}.`;
+		if (state.lastPantheonAction) now += ` Last: ${state.lastPantheonAction}.`;
+		const refused = pantheonPicks(M).some(function (pick) { return pick && godRefusal(pick.key); });
+		if (refused) now += ' Holobore is not slotted while golden cookie clicking is on.';
+		let wait = '';
+		if (nextPantheonMove(M)) wait = M.swaps < 1 ? `a worship swap (next in ${shortTime(msToNextSwap(M) / 1000)})` : 'its next check';
+		else if (pantheonStuckNote(M)) wait = pantheonStuckNote(M);
+		return { tab: 'pantheon', name: 'Pantheon', dot: wait ? 'wait' : 'on', now: now, wait: wait };
+	}
+
+	function extrasRow() {
+		const s = settings();
+		if (!s.sunder && !s.redFox) return null;
+		const parts = [];
+		if (s.sunder) parts.push(state.sunderBlocked ? `Sunder can't pet: ${state.sunderBlocked}.` : `Sunder: petting Krumblor ${s.sunderRate} times a second (${Beautify(state.sunderPets)} pets so far).`);
+		if (s.redFox) parts.push(isGameInEnglish() ? 'RedFox: wrinklers read "nibblers".' : 'RedFox is on, but only works with the game in English.');
+		return { tab: 'extras', name: 'Extras', dot: s.sunder && state.sunderBlocked ? 'wait' : 'on', now: parts.join(' '), wait: '' };
+	}
+
 	const TAB_HTML = {
 		clickers: clickersTabHtml, autobuy: autobuyTabHtml, lumps: lumpsTabHtml, dragon: dragonTabHtml,
-		market: marketTabHtml, grimoire: grimoireTabHtml, ascend: ascendTabHtml, other: otherTabHtml,
+		pantheon: pantheonTabHtml, market: marketTabHtml, grimoire: grimoireTabHtml, ascend: ascendTabHtml, extras: extrasTabHtml, other: otherTabHtml,
 	};
 
 	/* ----- The dashboard: one row per feature ----- */
@@ -4046,7 +4598,9 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 
 	function dashboardRows() {
 		let rows = [clickerRow(), wrinklerRow(), autoBuyRow(), reserveRow(), lumpRow()]
-			.concat(dragonRows(), marketRows(), [grimoireRow(), ascendRow()]);
+			.concat(dragonRows(), [pantheonRow()], marketRows(), [grimoireRow(), ascendRow()]);
+		const extras = extrasRow();
+		if (extras) rows.push(extras);
 		ext.tabs.forEach(function (tab) {
 			const row = addOnRow(tab);
 			if (row) rows.push(row);
@@ -4212,6 +4766,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		panel.addEventListener('input', onMenuInput);
 		panel.addEventListener('keydown', onMenuKeyDown);
 		panel.addEventListener('pointerdown', onDragPointerDown);
+		panel.addEventListener('pointerdown', onGodPointerDown);
 		center.parentNode.appendChild(panel);
 		if (typeof ResizeObserver !== 'undefined') {
 			new ResizeObserver(function (entries) {
@@ -4320,11 +4875,23 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 	}
 
 	function onMenuClick(event) {
-		const target = event.target.closest('[data-afk-toggle],[data-afk-cycle],[data-afk-lump],[data-afk-tab],[data-afk-action],[data-afk-go]');
+		const target = event.target.closest('[data-afk-toggle],[data-afk-cycle],[data-afk-lump],[data-afk-tab],[data-afk-action],[data-afk-go],[data-afk-aura-slot],[data-afk-aura],[data-afk-pslot-clear],[data-afk-god],[data-afk-pslot]');
 		if (!target) return;
 		const s = settings();
 		const data = target.dataset;
-		if (data.afkTab || data.afkGo) {
+		if (data.afkAuraSlot) {
+			state.auraSlot = state.auraSlot === data.afkAuraSlot ? '' : data.afkAuraSlot;
+		} else if (data.afkAura !== undefined) {
+			if (!state.auraSlot || !pickAura(state.auraSlot, Number(data.afkAura))) return;
+		} else if (data.afkPslotClear !== undefined) {
+			clearPantheonPick(Number(data.afkPslotClear));
+		} else if (data.afkGod || data.afkPslot !== undefined) {
+			// Click a god, then a slot. A click on a slot (or the god in it) with a god chosen puts that god there.
+			const slot = target.closest('[data-afk-pslot]');
+			if (slot && state.godSelected) setPantheonPick(Number(slot.dataset.afkPslot), state.godSelected);
+			else if (data.afkGod) state.godSelected = state.godSelected === data.afkGod ? '' : data.afkGod;
+			else return;
+		} else if (data.afkTab || data.afkGo) {
 			state.panelTab = data.afkTab || data.afkGo;
 			document.getElementById('afkPanelBody').scrollTop = 0;
 		} else if (data.afkAction) {
@@ -4416,22 +4983,6 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		if (label) label.textContent = thresholdReadable(value);
 	}
 
-	// An aura dropdown: '' leaves the slot alone, and the same aura can't be picked twice.
-	function onAuraPicked(select) {
-		const s = settings();
-		const key = select.dataset.afkSelect;
-		const other = key === 'dragonAura1' ? s.dragonAura2 : s.dragonAura1;
-		if (key !== 'dragonAura1' && key !== 'dragonAura2') return;
-		if (select.value === '' || (isAuraName(select.value) && select.value !== other)) s[key] = select.value;
-		refreshStatusLine(Date.now(), true);
-		// The other dropdown can't pick the same aura.
-		const otherKey = key === 'dragonAura1' ? 'dragonAura2' : 'dragonAura1';
-		const otherSelect = document.querySelector(`#afkBakerMenu [data-afk-select="${otherKey}"]`);
-		if (otherSelect) {
-			for (const option of otherSelect.options) option.disabled = option.value !== '' && option.value === s[key];
-		}
-	}
-
 	function onMenuChange(event) {
 		const input = event.target;
 		if (input.dataset && input.dataset.afkColor) {
@@ -4450,10 +5001,6 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			// The row's status and needed lumps follow the new target.
 			updateLumpList();
 			refreshStatusLine(Date.now(), true);
-			return;
-		}
-		if (input.dataset && input.dataset.afkSelect) {
-			onAuraPicked(input);
 			return;
 		}
 		const key = input.dataset && input.dataset.afkNumber;
@@ -4712,6 +5259,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		state.lastStatusRefresh = now;
 		refreshOverlay(now);
 		if (!ensurePanel()) return;
+		refreshRedFox();
 
 		const s = settings();
 		const stopped = state.lastError || (s.autoBuy && (calc.paused || (calc.blocked && calc.fileSource !== null))) || (s.autoAscend && state.ascendWarning);
@@ -4734,6 +5282,10 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			if (!focused || focused.tagName !== 'SELECT') renderMenuSection();
 		}
 	}
+
+	// The Pantheon and aura pickers draw the game's tooltips through these.
+	mod.godTip = function (key) { return function () { return godTooltipFor(key); }; };
+	mod.auraTip = function (id, slotKey) { return function () { return auraTooltip(id, slotKey); }; };
 
 	Game.registerMod(MOD_ID, mod);
 })();
