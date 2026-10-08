@@ -7,7 +7,7 @@
 	'use strict';
 
 	const MOD_ID = 'afk baker';
-	const VERSION = '2.2.0';
+	const VERSION = '2.3.0';
 	// Settings saved before a default changed are reset to the new default:
 	// v1 had auto-ascend on, v2 had Elder Pledge on, v3 had the Auto reserve.
 	const SETTINGS_VERSION = 4;
@@ -58,9 +58,16 @@
 	// Indexed by Game.elderWrath.
 	const GRANDMA_STAGE_NAMES = ['Appeased', 'Awoken', 'Displeased', 'Angered'];
 	const GODZAMOK_MODES = { buffs: 'During click buffs only', always: 'Whenever it pays' };
+	// The seasons with something to collect, in the order Auto seasons visits them. Keyed as in Game.seasons.
+	const SEASON_ORDER = ['valentines', 'christmas', 'halloween', 'easter'];
+	const SEASON_NAMES = { valentines: "Valentine's Day", christmas: 'Christmas', halloween: 'Halloween', easter: 'Easter', fools: 'Business Day' };
+	const SEASON_TOGGLES = { valentines: 'seasonValentines', christmas: 'seasonChristmas', halloween: 'seasonHalloween', easter: 'seasonEaster' };
+	// Where to stay once nothing is left to collect.
+	const HOME_SEASONS = { fools: 'Business Day', none: 'None', christmas: 'Christmas', halloween: 'Halloween', valentines: "Valentine's Day", easter: 'Easter' };
 	const CYCLE_OPTIONS = {
 		grandmaLimit: GRANDMA_LIMITS,
 		godzamokMode: GODZAMOK_MODES,
+		homeSeason: HOME_SEASONS,
 		reserveMode: RESERVE_MODES,
 		wrinklerMode: WRINKLER_MODES,
 		fortuneMode: FORTUNE_MODES,
@@ -198,6 +205,7 @@
 		officeMinutes: [0, MAX_DRAGON_TRAIN_MINUTES],
 		sunderRate: [1, 30],
 		godzamokCapPercent: [1, 50],
+		seasonRenewMinutes: [0, MAX_DRAGON_TRAIN_MINUTES],
 	};
 	const REINCARNATE_GRACE_MS = 3000;
 	const STATUS_REFRESH_MS = 500;
@@ -231,6 +239,11 @@
 	const GODZAMOK_KEEP = { Grandma: 1 };
 	const GODZAMOK_CHECK_INTERVAL_MS = 250;
 	const COMBO_SOUND = /^snd\/(sell|buy)\d\.mp3$/;
+	const SEASON_CHECK_INTERVAL_MS = 1000;
+	// Santa's last level (Game.santaLevels); each level costs (level + 1) to the power (level + 1) cookies.
+	const SANTA_MAX_LEVEL = 14;
+	// Seconds a wrinkler takes to crawl to the cookie before it feeds (Game.UpdateWrinklers).
+	const WRINKLER_CRAWL_SECONDS = 10;
 	// Where "wrinkler" turns up on screen: tooltips, the menus, the news ticker, notifications, prompts,
 	// the dragon and Santa panel, and AFK Baker's own panel and tab.
 	const REDFOX_CONTAINERS = ['tooltip', 'menu', 'commentsText', 'notes', 'prompt', 'specialPopup', 'afkPanel', 'afkOpen'];
@@ -280,6 +293,8 @@
 		keepLumps: 'Lumps to keep', lumpPriority: 'Sugar lump priority list', autoTrainDragon: 'Auto-train dragon',
 		dragonTrainMinutes: 'Dragon training limit, minutes of CpS', dragonAura1: 'Primary aura', dragonAura2: 'Secondary aura',
 		autoPetDragon: 'Auto-pet dragon', autoPantheon: 'Auto-Pantheon', pantheonDiamond: 'Pantheon: Diamond slot', pantheonRuby: 'Pantheon: Ruby slot', pantheonJade: 'Pantheon: Jade slot', godzamokCombo: 'Godzamok combos', godzamokMode: 'Godzamok combos: when', godzamokCapPercent: 'Godzamok combos: limit, % of the bank',
+		autoSeasons: 'Auto seasons', seasonValentines: "Auto seasons: Valentine's Day", seasonChristmas: 'Auto seasons: Christmas', seasonHalloween: 'Auto seasons: Halloween', seasonEaster: 'Auto seasons: Easter',
+		homeSeason: 'Home season', seasonRenewMinutes: 'Home season: renewal limit, minutes of CpS',
 		redFox: 'RedFox', sunder: 'Sunder', sunderRate: 'Sunder: pets per second', autoTrade: 'Auto-trade stocks', marketStrategy: 'Stock strategy', marketBuyPercent: 'Buy at % of resting value',
 		marketSellPercent: 'Sell at % of resting value', marketBankPercent: '% of the bank the market may use', marketSellAtLoss: 'Sell at a loss',
 		autoBrokers: 'Hire brokers', autoOffice: 'Upgrade office', officeMinutes: 'Office upgrade limit, minutes of CpS', autoCast: 'Auto-cast spell',
@@ -324,6 +339,13 @@
 		godzamokCombo: false,
 		godzamokMode: 'buffs',
 		godzamokCapPercent: 5,
+		autoSeasons: false,
+		seasonValentines: true,
+		seasonChristmas: true,
+		seasonHalloween: true,
+		seasonEaster: true,
+		homeSeason: 'fools',
+		seasonRenewMinutes: 30,
 		autoTrade: false,
 		marketStrategy: 'restingGuide',
 		marketBuyPercent: 30,
@@ -450,6 +472,15 @@
 		return settings;
 	}
 
+	// The collecting seasons Auto seasons has been in this run. Each gets one visit a run.
+	function sanitizeSeasonRun(raw) {
+		const run = { run: 0, visited: [] };
+		if (!raw || typeof raw !== 'object') return run;
+		run.run = finiteOr(raw.run, 0);
+		if (Array.isArray(raw.visited)) run.visited = SEASON_ORDER.filter(function (key) { return raw.visited.indexOf(key) !== -1; });
+		return run;
+	}
+
 	function freshRun() {
 		return { start: 0, allStart: 0, seen: 0, gains: {}, losses: {}, base: 0, bank: 0, setups: {} };
 	}
@@ -571,6 +602,9 @@
 		nextMarketCheckAt: 0,
 		nextPantheonCheckAt: 0,
 		lastPantheonAction: '',
+		nextSeasonCheckAt: 0,
+		lastSeasonAction: '',
+		seasonsSignature: '',
 		nextComboCheckAt: 0,
 		comboCount: 0,
 		comboLast: '',
@@ -668,6 +702,7 @@
 		ext: ext,
 		settings: sanitizeSettings(null),
 		income: freshIncome(),
+		seasonRun: { run: 0, visited: [] },
 		state: state,
 		init: function () {
 			Game.registerHook('logic', onLogic);
@@ -681,7 +716,7 @@
 			console.log(`${LOG_PREFIX} v${VERSION} loaded.`);
 		},
 		save: function () {
-			return JSON.stringify(Object.assign({ settingsVersion: SETTINGS_VERSION }, mod.settings, { income: mod.income }));
+			return JSON.stringify(Object.assign({ settingsVersion: SETTINGS_VERSION }, mod.settings, { income: mod.income, seasonRun: mod.seasonRun }));
 		},
 		load: function (str) {
 			let parsed = null;
@@ -692,6 +727,7 @@
 			}
 			mod.settings = sanitizeSettings(parsed);
 			mod.income = sanitizeIncome(parsed && parsed.income);
+			mod.seasonRun = sanitizeSeasonRun(parsed && parsed.seasonRun);
 			stopCounting();
 			tracker.loaded = true;
 			applyColors();
@@ -737,7 +773,8 @@
 			}
 			clickBigCookie(now);
 			if (s.clickGolden || s.clickReindeer) clickShimmers();
-			if (s.wrinklerMode === 'instant') popWrinklers(false);
+			if (isCollectingHalloween()) popFedWrinklers();
+			else if (s.wrinklerMode === 'instant') popWrinklers(false);
 			if (s.clickFortunes) clickFortune();
 			const comboMade = runGodzamok(now);
 			runAutoBuy(now);
@@ -747,6 +784,7 @@
 			runMarket(now);
 			runGrimoire(now);
 			runPantheon(now);
+			runSeasons(now);
 			checkAutoAscend();
 			refreshStatusLine(now);
 		} catch (e) {
@@ -2039,6 +2077,8 @@
 	function buyElderPledgeItems() {
 		// Feed mode wants the grandmapocalypse running so wrinklers can feed.
 		if (settings().wrinklerMode === 'feed') return false;
+		// A Halloween visit needs the wrinklers a pledge would send away.
+		if (isCollectingHalloween()) return false;
 		const pins = Game.Upgrades['Sacrificial rolling pins'];
 		if (isInStore(pins) && tryBuyUpgrade(pins)) return true;
 		// Pledging runs Game.CollectWrinklers, which pops every wrinkler including shinies.
@@ -3442,6 +3482,301 @@
 	}
 
 	/* =====================================================================
+	   SEASONS
+	   Each run, visits the seasons that still have something to collect, buys what turns up, and then
+	   stays in a home season. Seasonal upgrades are lost on ascending (bar the Keepsakes carry-over),
+	   so this starts over every run. It looks at what the store and the switchers show: what is unlocked
+	   and bought, the season and its timer, prices. Drops are left to the game's own rolls.
+	   ===================================================================== */
+
+	function seasonRun() {
+		if (mod.seasonRun.run !== Game.startDate) mod.seasonRun = { run: Game.startDate, visited: [] };
+		return mod.seasonRun;
+	}
+
+	// A group of seasonal upgrades: how many are there (unlocked counts for drops, bought for the rest).
+	function seasonPart(label, names, needBought) {
+		const missing = names.filter(function (name) {
+			const upgrade = Game.Upgrades[name];
+			return needBought ? !upgrade.bought : !(upgrade.bought || upgrade.unlocked);
+		});
+		return { label: label, total: names.length, have: names.length - missing.length, missing: missing };
+	}
+
+	// Why no wrinkler will come right now, or ''.
+	function wrinklerBlock() {
+		if (Game.Has('Elder Covenant')) return 'the Elder Covenant keeps the grandmas calm, so no wrinklers come';
+		if (Game.pledgeT > 0) return 'an Elder Pledge is running, so no wrinklers come';
+		if (Game.elderWrath > 0) return '';
+		if (openedGrandmaStage() > 0) return 'the grandmas are calm for now, so no wrinklers come';
+		return settings().grandmaLimit === 'never' ?
+			'your grandmapocalypse limit is Never start, so no wrinklers come' :
+			'the grandmapocalypse has not started (it starts with the research One mind), so no wrinklers come yet';
+	}
+
+	// What a season still has to collect. `left` counts what a visit can still bring; a visit ends at 0.
+	function seasonStatus(key) {
+		const s = settings();
+		const status = { key: key, name: SEASON_NAMES[key], enabled: !!s[SEASON_TOGGLES[key]], parts: [], left: 0, blocked: '', note: '' };
+		if (key === 'valentines') {
+			// Each heart biscuit unlocks, in season, once the one before it is bought.
+			status.parts.push(seasonPart('heart biscuits', Game.heartDrops, true));
+			status.left = status.parts[0].missing.length;
+		} else if (key === 'christmas') {
+			const hat = seasonPart('festive hat', ['A festive hat'], true);
+			const cookies = seasonPart('Christmas cookies', Game.reindeerDrops, false);
+			status.parts.push(hat, cookies,
+				{ label: 'Santa levels', total: SANTA_MAX_LEVEL, have: Math.min(Game.santaLevel, SANTA_MAX_LEVEL), missing: [] },
+				seasonPart("Santa's gifts", Game.santaDrops, false));
+			// Santa is levelled in any season once the hat is bought, so only the hat and the cookies hold a visit.
+			status.left = hat.missing.length + (s.clickReindeer ? cookies.missing.length : 0);
+			if (!s.clickReindeer && cookies.missing.length) status.note = 'reindeer clicking is off, so the Christmas cookies are left out';
+		} else if (key === 'halloween') {
+			status.parts.push(seasonPart('spooky cookies', Game.halloweenDrops, false));
+			status.left = status.parts[0].missing.length;
+			if (status.left) status.blocked = wrinklerBlock();
+		} else if (key === 'easter') {
+			status.parts.push(seasonPart('eggs', Game.easterEggs, false));
+			status.left = status.parts[0].missing.length;
+			if (status.left && !s.clickGolden) status.blocked = 'golden cookie clicking is off, and eggs come from golden cookies';
+		}
+		status.done = status.left === 0;
+		return status;
+	}
+
+	// True while Auto seasons is in Halloween for the spooky cookies. For that time wrinklers are popped
+	// as soon as they have fed and no Elder Pledge is bought; the player's own settings are not changed.
+	function isCollectingHalloween() {
+		const s = settings();
+		if (!s.autoSeasons || !s.seasonHalloween || Game.season !== 'halloween' || state.paused) return false;
+		return Game.halloweenDrops.some(function (name) { return !(Game.Upgrades[name].bought || Game.Upgrades[name].unlocked); });
+	}
+
+	// A wrinkler only rolls for a drop if it has eaten something (Game.UpdateWrinklers: sucked > 0.5),
+	// so each is popped once it has, not before. Shiny wrinklers are left alone.
+	function popFedWrinklers() {
+		for (const wrinkler of Game.wrinklers) {
+			if (wrinkler.phase === 2 && wrinkler.sucked > 0.5 && !isShiny(wrinkler) && wrinkler.hp > 0) wrinkler.hp = -10;
+		}
+	}
+
+	// What Selebrak, the god of seasons, takes off a drop's failure rate, by his slot.
+	function seasonGodFactor() {
+		const level = Game.hasGod ? Game.hasGod('seasons') : 0;
+		return level === 1 ? 0.9 : level === 2 ? 0.95 : level === 3 ? 0.97 : 1;
+	}
+
+	// How many tries it takes on average to find `missing` more of `kinds` equally likely drops, when a
+	// try succeeds with chance p and a drop already found counts for nothing.
+	function expectedTries(p, kinds, missing) {
+		let tries = 0;
+		for (let left = 1; left <= missing; left++) tries += kinds / (p * left);
+		return tries;
+	}
+
+	// Hours a Halloween visit should take from here, from the game's published drop and spawn rules
+	// (Game.UpdateWrinklers) and what the save shows. null while no wrinklers come.
+	function halloweenHours() {
+		const missing = seasonPart('', Game.halloweenDrops, false).missing.length;
+		if (!missing || Game.elderWrath < 1) return null;
+		let fail = Game.HasAchiev('Spooky cookies') ? 0.8 : 0.95;
+		if (Game.Has('Starterror')) fail *= 0.9;
+		fail = fail / Game.dropRateMult() * seasonGodFactor();
+		let spawn = 0.00001 * Game.elderWrath * Game.eff('wrinklerSpawn');
+		if (Game.Has('Unholy bait')) spawn *= 5;
+		const scorn = Game.hasGod ? Game.hasGod('scorn') : 0;
+		spawn *= scorn === 1 ? 2.5 : scorn === 2 ? 2 : scorn === 3 ? 1.5 : 1;
+		const secondsPerPop = 1 / (Game.getWrinklersMax() * spawn * Game.fps) + WRINKLER_CRAWL_SECONDS;
+		return expectedTries(1 - fail, Game.halloweenDrops.length, missing) * secondsPerPop / 3600;
+	}
+
+	// The same for the Christmas cookies, which reindeer drop.
+	function christmasHours() {
+		const missing = seasonPart('', Game.reindeerDrops, false).missing.length;
+		if (!missing) return null;
+		let fail = Game.HasAchiev('Let it snow') ? 0.6 : 0.8;
+		fail = fail / Game.dropRateMult() * seasonGodFactor();
+		if (Game.Has('Starsnow')) fail *= 0.95;
+		const reindeer = Game.shimmerTypes['reindeer'];
+		const min = reindeer.getMinTime(reindeer);
+		const max = reindeer.getMaxTime(reindeer);
+		// The game's spawn curve puts the average a third of the way from the shortest wait to the longest.
+		const secondsPerReindeer = (min + (max - min) / 3) / Game.fps;
+		return expectedTries(1 - fail, Game.reindeerDrops.length, missing) * secondsPerReindeer / 3600;
+	}
+
+	function hoursText(hours) {
+		return hours < 1 ? `about ${Math.max(1, Math.round(hours * 60))} minutes` : `about ${hours.toFixed(1)} hours`;
+	}
+
+	// Switching needs the heavenly upgrade, and heavenly upgrades are off in a Born again run.
+	function switchBlock() {
+		if (Game.ascensionMode === 1) return 'seasons can\'t be switched in a Born again run';
+		if (!Game.Has('Season switcher')) return 'switching needs the heavenly upgrade "Season switcher"';
+		return '';
+	}
+
+	// A switch to a season: ready to buy, or what it waits for. A switch to the home season is also
+	// held to the renewal limit, since each one costs half as much again as the last.
+	function switchStep(key, purpose) {
+		const step = { action: 'wait', season: key, purpose: purpose, wait: '', price: 0 };
+		step.wait = switchBlock();
+		if (step.wait) return step;
+		const upgrade = Game.seasons[key].triggerUpgrade;
+		step.price = upgrade.getPrice();
+		if (purpose === 'home' && step.price > settings().seasonRenewMinutes * 60 * Game.unbuffedCps) {
+			step.action = 'idle';
+			step.tooDear = true;
+			return step;
+		}
+		if (!isInStore(upgrade) || upgrade.bought) step.wait = 'its switcher to be on offer';
+		else if (!canAfford(step.price)) step.wait = `${Beautify(Math.max(0, step.price + reserveAmount() - Game.cookies))} more cookies`;
+		else step.action = 'switch';
+		return step;
+	}
+
+	// What Auto seasons does next: { action: 'collect' | 'switch' | 'wait' | 'idle', season, ... } plus
+	// the status of every season and the ones waiting on something.
+	function seasonPlan() {
+		const s = settings();
+		const visited = seasonRun().visited;
+		const current = Game.season;
+		const statuses = {};
+		SEASON_ORDER.forEach(function (key) { statuses[key] = seasonStatus(key); });
+		const workable = function (key) { return !!statuses[key] && statuses[key].enabled && !statuses[key].done && !statuses[key].blocked; };
+		let plan;
+		const next = SEASON_ORDER.filter(function (key) { return key !== current && workable(key) && visited.indexOf(key) === -1; })[0];
+		if (workable(current)) {
+			// The season it is in still has something: stay, whether it was bought or the calendar gave it.
+			plan = { action: 'collect', season: current, free: current === Game.baseSeason };
+		} else if (next) {
+			plan = switchStep(next, 'collect');
+		} else if (s.homeSeason === 'none' || current === s.homeSeason) {
+			plan = { action: 'idle', season: current, atHome: s.homeSeason !== 'none' };
+		} else {
+			plan = switchStep(s.homeSeason, 'home');
+		}
+		plan.statuses = statuses;
+		plan.next = plan.action === 'collect' ? (next || '') : '';
+		// Seasons that still have something but can't be worked on, or were already given their visit.
+		plan.pending = SEASON_ORDER.filter(function (key) { return key !== current && statuses[key].enabled && !statuses[key].done && statuses[key].blocked && visited.indexOf(key) === -1; });
+		return plan;
+	}
+
+	// The one place a season switcher is bought. Switchers are switches, which nothing else in AFK
+	// Baker buys; this is called only by runSeasons, for the season its plan chose.
+	function switchSeason(key) {
+		const upgrade = Game.seasons[key] && Game.seasons[key].triggerUpgrade;
+		if (!upgrade || upgrade.bought || !isInStore(upgrade) || !canAfford(upgrade.getPrice())) return false;
+		const price = upgrade.getPrice();
+		// buy(1) goes straight to the purchase; without it the click handler for cancelling a season runs first.
+		withPurchaseSoundMuted(function () { upgrade.buy(1); });
+		if (Game.season !== key) return false;
+		state.lastSeasonAction = `switched to ${SEASON_NAMES[key]} for ${Beautify(price)} cookies`;
+		debugLog('Seasons:', state.lastSeasonAction);
+		return true;
+	}
+
+	// Buys what the seasons have turned up: the hat, Santa's levels, and every seasonal upgrade on offer
+	// (the Chocolate egg is on the never-buy list). Each has to cost less than the no-payback limit and
+	// leave the cookie reserve alone. Works in any season: an unlocked upgrade stays on offer.
+	function buySeasonItems() {
+		const s = settings();
+		const limit = s.utilityMinutes * 60 * Game.unbuffedCps;
+		let bought = false;
+		const groups = [];
+		if (s.seasonValentines) groups.push(Game.heartDrops);
+		if (s.seasonChristmas) groups.push(['A festive hat', "Santa's dominion"], Game.santaDrops, Game.reindeerDrops);
+		if (s.seasonHalloween) groups.push(Game.halloweenDrops);
+		if (s.seasonEaster) groups.push(Game.easterEggs);
+		for (const names of groups) {
+			for (const name of names) {
+				const upgrade = Game.Upgrades[name];
+				if (!upgrade.unlocked || upgrade.bought || !isInStore(upgrade) || !isAllowedUpgrade(upgrade)) continue;
+				if (upgrade.getPrice() > limit || !tryBuyUpgrade(upgrade)) continue;
+				bought = true;
+				state.lastSeasonAction = `bought ${upgrade.name}`;
+			}
+		}
+		if (s.seasonChristmas && Game.Has('A festive hat') && Game.santaLevel < SANTA_MAX_LEVEL) {
+			const cost = Math.pow(Game.santaLevel + 1, Game.santaLevel + 1);
+			// Game.UpgradeSanta wants more than the cost banked.
+			if (cost <= limit && canAfford(cost) && Game.cookies > cost) {
+				const level = Game.santaLevel;
+				withSpecialPanelRestored(function () {
+					withSoundsMuted(DRAGON_SOUND, function () { Game.UpgradeSanta(); });
+				});
+				if (Game.santaLevel > level) {
+					bought = true;
+					state.lastSeasonAction = `raised Santa to level ${Game.santaLevel}`;
+				}
+			}
+		}
+		if (bought) {
+			debugLog('Seasons:', state.lastSeasonAction);
+			noteGameChanged();
+		}
+	}
+
+	// Being in a collecting season is its visit for this run, however it came about. The calendar's own
+	// season costs nothing and never runs out, so it is not counted.
+	function noteSeasonVisit() {
+		const run = seasonRun();
+		const current = Game.season;
+		if (SEASON_ORDER.indexOf(current) !== -1 && current !== Game.baseSeason && run.visited.indexOf(current) === -1) run.visited.push(current);
+	}
+
+	function runSeasons(now) {
+		if (!settings().autoSeasons || now < state.nextSeasonCheckAt) return;
+		state.nextSeasonCheckAt = now + SEASON_CHECK_INTERVAL_MS;
+		// Nothing is bought with an ascension on its way.
+		if (state.ascendPending || state.ascendTriggered) return;
+		noteSeasonVisit();
+		buySeasonItems();
+		const plan = seasonPlan();
+		if (plan.action === 'switch' && switchSeason(plan.season)) noteSeasonVisit();
+	}
+
+	function seasonTimeLeft() {
+		if (!Game.season) return '';
+		if (Game.season === Game.baseSeason) return 'calendar season, free';
+		return `${formatDuration(Math.max(0, Game.seasonT) / Game.fps * 1000)} left`;
+	}
+
+	// "4 of 7 Christmas cookies, Santa level 9 of 14": what a season's parts still lack.
+	function seasonProgress(status) {
+		return status.parts.filter(function (part) { return part.have < part.total; }).map(function (part) {
+			return part.total === 1 ? `no ${part.label} yet` : `${part.have} of ${part.total} ${part.label}`;
+		}).join(', ');
+	}
+
+	function seasonsRow() {
+		const s = settings();
+		const row = { tab: 'seasons', name: 'Seasons', dot: 'on', now: '', wait: '' };
+		const current = Game.season ? `${SEASON_NAMES[Game.season] || Game.season} (${seasonTimeLeft()})` : 'No season';
+		if (!s.autoSeasons) return Object.assign(row, { dot: 'off', now: `Auto seasons off. ${current}.` });
+		const plan = seasonPlan();
+		const waiting = plan.pending.map(function (key) { return `${SEASON_NAMES[key]} waits: ${plan.statuses[key].blocked}`; }).join('; ');
+		if (plan.action === 'collect') {
+			row.now = `${current}: collecting. So far: ${seasonProgress(plan.statuses[plan.season])}.`;
+			row.wait = plan.next ? `the rest here, then ${SEASON_NAMES[plan.next]}` : 'the rest here, then the home season';
+			row.dot = 'wait';
+		} else if (plan.action === 'switch' || plan.action === 'wait') {
+			const price = plan.price ? ` (${Beautify(plan.price)} cookies)` : '';
+			row.now = `${current}. Next: ${SEASON_NAMES[plan.season]}${price}, ${plan.purpose === 'home' ? 'the home season' : 'to collect there (so far: ' + seasonProgress(plan.statuses[plan.season]) + ')'}.`;
+			row.wait = plan.wait;
+			row.dot = 'wait';
+		} else if (plan.tooDear) {
+			row.now = `${current}. Nothing left to collect. Not switching to ${SEASON_NAMES[plan.season]}: the switch costs ${cpsTime(plan.price)} of CpS, over your limit of ${s.seasonRenewMinutes} min.`;
+		} else {
+			row.now = `${current}${plan.atHome ? ', the home season' : ''}. Nothing left to collect${plan.atHome || s.homeSeason !== 'none' ? '' : ', and no home season is set'}.`;
+		}
+		if (waiting) row.now += ` ${waiting}.`;
+		if (state.lastSeasonAction) row.now += ` Last: ${state.lastSeasonAction}.`;
+		return row;
+	}
+
+	/* =====================================================================
 	   GODZAMOK COMBOS
 	   With Godzamok slotted, selling buildings gives Devastation: +1% click power per building sold
 	   (Diamond slot; half that in Ruby, a quarter in Jade) for 10 seconds. A combo sells whole building
@@ -4297,6 +4632,8 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 #afkPanel .afk-stats th:first-child,#afkPanel .afk-stats td:first-child{text-align:left;position:sticky;left:0px;background:#0b0b0b;}
 #afkPanel .afk-stats td.afk-stats-live{color:#fff;}
 #afkPanel .afk-stats tr.afk-stats-section td{padding-top:10px;font-size:10px;text-transform:uppercase;letter-spacing:0.4px;color:rgba(255,255,255,0.6);border-bottom:1px solid rgba(255,255,255,0.25);}
+#afkPanel .afk-seasons th,#afkPanel .afk-seasons td{text-align:left;}
+#afkPanel .afk-seasons td.afk-seasons-missing{white-space:normal;min-width:120px;max-width:260px;}
 #tooltip .afk-tip{margin:0px 8px 8px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.2);font-size:11px;text-align:left;position:relative;}
 #tooltip .afk-tip-who{font-size:9px;text-transform:uppercase;letter-spacing:0.5px;opacity:0.55;}
 #tooltip .afk-tip-rating{font-size:13px;color:#fff;margin:2px 0px;}
@@ -4683,7 +5020,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 	// AFK Baker's own tabs, in order. Tabs registered by add-ons come after them.
 	const TABS = [
 		['dashboard', 'Dashboard'], ['clickers', 'Clickers'], ['autobuy', 'Auto-buy'], ['lumps', 'Sugar lumps'], ['dragon', 'Dragon'], ['pantheon', 'Pantheon'],
-		['market', 'Stock Market'], ['grimoire', 'Grimoire'], ['ascend', 'Auto-ascend'], ['stats', 'Stats'], ['other', 'Other'],
+		['market', 'Stock Market'], ['grimoire', 'Grimoire'], ['ascend', 'Auto-ascend'], ['seasons', 'Seasons'], ['stats', 'Stats'], ['other', 'Other'],
 	];
 
 	// A "?" that shows an explanation in the game's own tooltip when hovered.
@@ -4729,7 +5066,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			html += listing(toggleButton('buyResearch', 'Buy research') + hint('Research upgrades advance the grandmapocalypse.')) +
 				(s.buyResearch ? listing(cycleButton('grandmaLimit', 'Stop the grandmapocalypse at') + hint(grandmaLimitTip())) : '') +
 				listing(toggleButton('elderPledge', 'Elder Pledge') +
-					hint('Pledging stops wrinklers from spawning. Never pledges in Feed mode or while a shiny wrinkler is on screen.'));
+					hint('Pledging stops wrinklers from spawning. Never pledges in Feed mode or while a shiny wrinkler is on screen. It is also held while Auto seasons collects in Halloween, which needs wrinklers.'));
 		}
 		if (s.autoBuy) {
 			html += listing(toggleButton('buyUtility', 'Buy no-payback upgrades') +
@@ -5289,9 +5626,85 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		}
 	}
 
+	/* ----- Seasons tab ----- */
+
+	// Where a season stands in the plan, for the table.
+	function seasonStanding(key, plan) {
+		const status = plan.statuses[key];
+		const visited = seasonRun().visited.indexOf(key) !== -1;
+		if (!status.enabled) return 'Skipped: switched off below';
+		if (plan.action === 'collect' && plan.season === key) return `Collecting now (${seasonTimeLeft()})`;
+		if (status.done) return status.note ? `Done (${status.note})` : 'Done';
+		if (status.blocked) return `Waiting: ${status.blocked}`;
+		if (visited) return 'Had its visit this run; the rest waits for the next run';
+		if (plan.season === key && plan.purpose === 'collect') return plan.wait ? `Next, waiting for ${plan.wait}` : 'Next';
+		return 'Later this run';
+	}
+
+	function seasonsTableHtml(plan) {
+		let html = '<tr><th>Season</th><th>Collected</th><th>Still missing</th><th>Plan</th></tr>';
+		for (const key of SEASON_ORDER) {
+			const status = plan.statuses[key];
+			const collected = status.parts.map(function (part) { return `${capitalize(part.label)} ${part.have}/${part.total}`; }).join('<br>');
+			const missing = [].concat.apply([], status.parts.map(function (part) { return part.missing; }));
+			html += `<tr><td><b>${SEASON_NAMES[key]}</b></td><td>${collected}</td><td class="afk-seasons-missing">${missing.length ? escapeHtml(missing.join(', ')) : '&ndash;'}</td><td class="afk-seasons-missing">${escapeHtml(seasonStanding(key, plan))}</td></tr>`;
+		}
+		return `<div class="afk-stats-wrap"><table class="afk-stats afk-seasons">${html}</table></div>`;
+	}
+
+	// What the table shows, as one string: when it changes the tab is drawn again.
+	function seasonsSignature(plan) {
+		return JSON.stringify([Game.season, plan.action, plan.season, plan.wait || '', SEASON_ORDER.map(function (key) { return seasonStanding(key, plan) + plan.statuses[key].parts.map(function (part) { return part.have; }).join(','); })]);
+	}
+
+	function seasonToggleHint(key) {
+		if (key === 'valentines') return 'The seven heart biscuits. Each one unlocks, during Valentine\'s Day, once the one before it is bought, so a visit takes about a minute late in a run and longer early on, when the next biscuit is not yet affordable.';
+		if (key === 'christmas') {
+			const hours = christmasHours();
+			return 'The festive hat, Santa\'s 14 levels with a gift each, Santa\'s dominion, and the seven Christmas cookies that reindeer drop. The visit lasts until the hat is bought and the cookies are found; Santa is levelled afterwards too, in any season. Reindeer clicking has to be on for the cookies.' +
+				(hours === null ? '' : ` On this save now: ${hoursText(hours)} for the cookies still missing.`);
+		}
+		if (key === 'halloween') {
+			const hours = halloweenHours();
+			const missing = seasonPart('', Game.halloweenDrops, false).missing.length;
+			return 'The seven spooky cookies, which wrinklers drop when popped during Halloween. For the visit AFK Baker pops each wrinkler as soon as it has fed and buys no Elder Pledge, whatever your wrinkler and pledge settings say; those settings are not changed and apply again when the visit ends. With no pledge the grandmas stay awake, so golden cookies come as wrath cookies for that time: a third, two thirds or all of them, by stage. Shiny wrinklers are left alone. It needs wrinklers: it never buys research past your grandmapocalypse limit and never revokes an Elder Covenant, and waits or is passed over while the grandmas are calm. ' +
+				(!missing ? 'On this save now: nothing is missing.' :
+					hours === null ? `On this save now: ${wrinklerBlock()}.` :
+					`On this save now: ${hoursText(hours)} for the ${missing} still missing, at the grandmas' current stage (${GRANDMA_STAGE_NAMES[Game.elderWrath]}).`);
+		}
+		return 'The 20 eggs, which golden and wrath cookies drop when clicked during Easter. This is the long one: several hours, and the rare eggs can outlast the 24 hours a visit has. Golden cookie clicking has to be on. The Chocolate egg is never bought; Easter counts as complete once it has dropped.';
+	}
+
+	function seasonsTabHtml() {
+		const s = settings();
+		let html = listing(toggleButton('autoSeasons', 'Auto seasons') +
+			hint('Seasonal upgrades are lost on every ascension, so each run this visits the seasons that still have something to collect, in the order Valentine\'s Day, Christmas, Halloween, Easter, and buys what turns up. A season gets one visit a run: it ends when everything there is collected or when the 24 hours a switch buys run out. A season the calendar gives you for free comes first and is not left until it is complete. When nothing is left it moves to your home season. The hat, Santa\'s levels and the seasonal upgrades are bought when they cost less than the no-payback limit on the Auto-buy tab (' + s.utilityMinutes + ' minutes of CpS), with or without auto-buy. Every purchase, switches included, leaves your cookie reserve alone. Switching needs the heavenly upgrade Season switcher; a switch costs a billion cookies plus a minute of CpS, half as much again for each switch already made this run.'));
+		const block = switchBlock();
+		if (block) html += listing(`<label>${capitalize(block)}. Until then only a season the calendar brings is collected.</label>`);
+		const plan = seasonPlan();
+		state.seasonsSignature = seasonsSignature(plan);
+		html += seasonsTableHtml(plan);
+		if (!s.autoSeasons) return html;
+		html += heading('Seasons to visit') +
+			SEASON_ORDER.map(function (key) { return listing(toggleButton(SEASON_TOGGLES[key], SEASON_NAMES[key]) + hint(seasonToggleHint(key))); }).join('') +
+			heading('Afterwards') +
+			listing(cycleButton('homeSeason', 'Home season') +
+				hint('Where to stay once nothing is left to collect. CpS is the same in every season. Business Day makes golden cookies come 5% more often with the heavenly upgrade Startrade, the best for a setup built on clicks and golden cookies; it also shows buildings under business names. Easter, Halloween and Valentine\'s Day give 2% with their Star upgrades. Christmas brings reindeer instead, which suits a setup without the autoclicker. None stops switching once collecting is done.')) +
+			(s.homeSeason === 'none' ? '' : listing(`<label>Switch to it, and renew it each day, while that costs less than</label> ${numberInput('seasonRenewMinutes', 50)}<label>minutes of CpS</label>` +
+				hint('A season lasts 24 hours, and every switch costs half as much again as the one before, so keeping a home season gets dearer by the day: about 7 minutes of CpS for the first, 37 by the fifth renewal, over an hour after a week. Past this limit AFK Baker lets the season run out. Set it to 0 to never switch to a home season.')));
+		return html;
+	}
+
+	// The table changes as drops come in; it is drawn again when it does, unless a field is being typed in.
+	function updateSeasonsTab() {
+		const focused = document.activeElement;
+		if (focused && (focused.tagName === 'INPUT' || focused.tagName === 'SELECT' || focused.tagName === 'TEXTAREA')) return;
+		if (seasonsSignature(seasonPlan()) !== state.seasonsSignature) renderMenuSection();
+	}
+
 	const TAB_HTML = {
 		clickers: clickersTabHtml, autobuy: autobuyTabHtml, lumps: lumpsTabHtml, dragon: dragonTabHtml,
-		pantheon: pantheonTabHtml, market: marketTabHtml, grimoire: grimoireTabHtml, ascend: ascendTabHtml, stats: statsTabHtml, other: otherTabHtml,
+		pantheon: pantheonTabHtml, market: marketTabHtml, grimoire: grimoireTabHtml, ascend: ascendTabHtml, seasons: seasonsTabHtml, stats: statsTabHtml, other: otherTabHtml,
 	};
 
 	/* ----- The dashboard: one row per feature ----- */
@@ -5327,7 +5740,8 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		let wait = '';
 		if (s.wrinklerMode === 'feed') wait = s.autoAscend ? 'the auto-ascend, to pop them first' : '';
 		return { tab: 'clickers', name: 'Wrinklers', dot: s.wrinklerMode === 'off' ? 'off' : 'on',
-			now: (s.wrinklerMode === 'off' ? 'Left alone. ' : '') + capitalize(afterLabel(wrinklerLine())) + '.', wait: wait };
+			now: (s.wrinklerMode === 'off' ? 'Left alone. ' : '') + capitalize(afterLabel(wrinklerLine())) + '.' +
+				(isCollectingHalloween() ? ' Halloween: Auto seasons pops each one as soon as it has fed, for the spooky cookies. Your setting is unchanged.' : ''), wait: wait };
 	}
 
 	function autoBuyRow() {
@@ -5468,7 +5882,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		const grandmas = grandmaRow();
 		const godzamok = godzamokRow();
 		let rows = [clickerRow(), wrinklerRow(), autoBuyRow()].concat(grandmas ? [grandmas] : [], [reserveRow(), lumpRow()])
-			.concat(dragonRows(), [pantheonRow()], godzamok ? [godzamok] : [], marketRows(), [grimoireRow(), ascendRow()]);
+			.concat(dragonRows(), [pantheonRow()], godzamok ? [godzamok] : [], marketRows(), [grimoireRow(), seasonsRow(), ascendRow()]);
 		rows = rows.concat(extrasRows());
 		ext.tabs.forEach(function (tab) {
 			const row = addOnRow(tab);
@@ -6168,6 +6582,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		}
 		if (state.panelTab === 'lumps') updateLumpList();
 		if (state.panelTab === 'stats') updateStatsTab();
+		if (state.panelTab === 'seasons') updateSeasonsTab();
 		// The aura lists show which auras are locked; redraw them when the dragon levels up, unless one is open.
 		if (state.panelTab === 'dragon' && Game.dragonLevel !== state.renderedDragonLevel) {
 			const focused = document.activeElement;

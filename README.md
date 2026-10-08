@@ -1,6 +1,6 @@
 # AFK Baker
 
-A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building (1, 10 or 100 at a time) or upgrade by its own payback-period calculation, harvests and spends sugar lumps, trains Krumblor the dragon, trades on the Stock Market, casts Grimoire spells, counts where your cookies come from, and ascends when you reach a prestige goal.
+A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building (1, 10 or 100 at a time) or upgrade by its own payback-period calculation, harvests and spends sugar lumps, trains Krumblor the dragon, trades on the Stock Market, casts Grimoire spells, collects the seasons, counts where your cookies come from, and ascends when you reach a prestige goal.
 
 It uses only the game's built-in mod API (`Game.registerMod`). CCSE is not needed.
 
@@ -13,7 +13,7 @@ Every feature can be turned on or off in **AFK Baker's own panel**. Open it with
 - The dot on the tab shows the state at a glance: green running, yellow paused, red when a safety check or an error stopped something.
 - **What auto-buy is doing**, next to the tab, without opening the panel: `Saving for 10x Fractal engine (2h 41m)`, `Bought 1x Cursor`, `Fast buying`, `Paused`, `Paused: safety check` or `Auto-buy off`. The time is how long the missing cookies take at your unbuffed CpS. It changes at most once a second, and clicking it opens the Auto-buy tab. It sits in the strip under the news ticker, so it never covers the news, and is cut short with an ellipsis on a narrow window. It has its own switch on the Auto-buy tab (on by default).
 - **Dashboard**: one row per feature with what it is doing now and what it is waiting for. Click a row to open its tab. Each settings tab shows its own rows at the top.
-- **Tabs**: Clickers, Auto-buy, Sugar lumps, Dragon, Pantheon, Stock Market, Grimoire, Auto-ascend, Stats and Other. Explanations are behind the "?" next to a setting: hover it. A sub-setting is only shown while the setting it belongs to is on.
+- **Tabs**: Clickers, Auto-buy, Sugar lumps, Dragon, Pantheon, Stock Market, Grimoire, Auto-ascend, Seasons, Stats and Other. Explanations are behind the "?" next to a setting: hover it. A sub-setting is only shown while the setting it belongs to is on.
 - **Pause all** (top of the panel, on every tab): stops everything AFK Baker does without changing any setting. Resume picks up where it left off. The store ratings keep showing. A pause is not remembered when the game restarts, so a forgotten pause can't silently stop an AFK session.
 - **Settings export and import** (Other tab): Copy gives every setting as one line of text. To import, paste a text and press Check import. It lists what would change and changes nothing until you press Apply. The text is checked the same way a saved game's settings are. Auto-ascend is always imported switched off, so a pasted text can't trigger an ascension.
 - The panel is only redrawn when you do something, so a field you are typing in and a drag in progress are never interrupted.
@@ -81,7 +81,7 @@ Every feature can be turned on or off in **AFK Baker's own panel**. Open it with
   - The research you give up is CpS: One mind and Communal brainsweep each add 0.02 base CpS per grandma to every grandma, Elder Pact adds 0.05 per portal, and Exotic nuts and Arcane sugar add 4% and 5%. **The setting's tooltip shows what each choice costs in CpS on your save**, worked out by the payback calculator. It changes through a run, as grandmas become a smaller or larger part of your CpS.
   - Research held back is marked as skipped in the store, with the reason.
   - **If the grandmas are already past the stage you pick**, there is no way back to a stage in between, and AFK Baker buys nothing to undo it. The Dashboard lists what you can do, with prices: an Elder Pledge (calm for 30 minutes, or 60 with Sacrificial rolling pins, and it pops every wrinkler), the Elder Covenant (calm for good, at 5% less CpS), or ascending, which starts research over.
-- **Elder Pledge** (off by default): buys Elder Pledge whenever the grandmapocalypse is active, plus Sacrificial rolling pins when they're available. Pledging stops wrinklers from spawning.
+- **Elder Pledge** (off by default): buys Elder Pledge whenever the grandmapocalypse is active, plus Sacrificial rolling pins when they're available. Pledging stops wrinklers from spawning. It is held while Auto seasons collects in Halloween, which needs wrinklers.
   - It never pledges in Feed mode.
   - It never pledges while a shiny wrinkler is on screen, because the game's pledge pops every wrinkler, shinies included.
   - To end the grandmapocalypse automatically, switch the wrinkler mode to Pop instantly or Off, and turn this on.
@@ -259,6 +259,43 @@ How the market works, in short:
 - The threshold box takes plain digits (commas are fine) or scientific notation such as `1.146e15`, and is wide enough for 20 digits. Next to it, the mod shows the value in the game's own number format (for example `= 1.146 quadrillion`) so you can check you typed the right number of digits. Something that isn't a number keeps the old threshold.
 - **Safety guard**: auto-ascend only fires when you cross the threshold during play. If the threshold is already reached when the mod loads, when you turn auto-ascend on, or when you change the threshold, type or wrinkler mode, the mod shows a warning instead of ascending. To confirm, toggle auto-ascend off and on again.
 
+**Seasons**
+
+**Seasonal upgrades are lost on every ascension.** That's how the game works: the heart biscuits, Christmas and spooky cookies, eggs, Santa's level and his gifts all have to be collected again each run (the heavenly upgrade Keepsakes lets each drop keep a 1 in 5 chance of staying unlocked). Auto seasons does the round for you.
+
+- **Auto seasons** (off by default): each run it visits the seasons that still have something to collect, buys what turns up, and then stays in a home season.
+  - **Order**: Valentine's Day, Christmas, Halloween, Easter. Valentine's Day comes first because it takes about a minute late in a run; Christmas second because Santa's bottomless bag makes every later drop more common.
+  - **One visit per season per run.** A visit ends when everything collectable there is collected, or when the 24 hours a switch buys run out. The season is not bought a second time that run.
+  - **A season the calendar gives you** (Christmas in late December, and so on) is free and doesn't run out. If it has something left, it is collected first, without a switch, and not left until it is complete.
+  - **Each season can be switched off** on the Seasons tab, to skip it.
+- **What it collects**
+  - **Valentine's Day**: the seven heart biscuits, bought in order; each one unlocks once the one before it is bought.
+  - **Christmas**: the festive hat, Santa's 14 levels with a gift each, Santa's dominion, and the seven Christmas cookies that reindeer drop. The visit lasts until the hat is bought and the cookies are found. Santa is levelled in any season, so his levels don't hold the visit. With reindeer clicking off, the cookies are left out.
+  - **Halloween**: the seven spooky cookies, dropped by popped wrinklers. See below.
+  - **Easter**: the 20 eggs, dropped by clicked golden and wrath cookies. This is the long one: several hours on average, and the rare eggs can outlast the 24 hours. It needs golden cookie clicking on. The **Chocolate egg is never bought**; Easter counts as complete once it has dropped.
+  - **Business Day** has nothing to collect.
+- **Halloween needs wrinklers.** For the visit, AFK Baker pops each wrinkler as soon as it has fed (a wrinkler that hasn't eaten rolls for nothing) and buys no Elder Pledge, whatever your wrinkler and Elder Pledge settings say. **Those settings are not changed**: they apply again the moment the visit ends, including anything you change during it. Shiny wrinklers are left alone.
+  - With no pledge the grandmas stay awake, so **golden cookies come as wrath cookies for that time**: a third, two thirds or all of them, by stage.
+  - It never buys research past your grandmapocalypse limit and never revokes an Elder Covenant. While the grandmas are calm, a pledge is running, or a covenant is in place, Halloween waits and the plan moves on; it comes back to Halloween if wrinklers start coming later in the run.
+  - Halloween's tooltip shows how long the visit should take on your save right now, from the game's drop and spawn rules. It depends on the grandmas' stage (wrinklers come three times as fast at Angered as at Awoken) and on upgrades such as Unholy bait and Santa's bottomless bag, so it ranges from under an hour to half a day.
+- **Buying**: the hat, Santa's levels, the heart biscuits and every seasonal upgrade are bought when they cost less than the no-payback limit on the Auto-buy tab (5 minutes of CpS by default). This works with auto-buy off. Every purchase, switches included, leaves the cookie reserve alone.
+- **Switching** needs the heavenly upgrade Season switcher. A switch costs a billion cookies plus a minute of unbuffed CpS, and half as much again for every switch already made this run (Selebrak in the Pantheon makes it dearer still). A whole round is five or six switches, 13 to 20 minutes of CpS in all.
+  - The season switchers are switches, which nothing else in AFK Baker ever buys. One function buys them, and only Auto seasons calls it.
+- **Home season** (default Business Day): where to stay once nothing is left to collect. CpS is the same in every season; what differs is the extra.
+
+  | Home season | What it gives while active |
+  |---|---|
+  | Business Day | golden cookies 5% more often (with Startrade); buildings shown under business names |
+  | Easter, Halloween, Valentine's Day | golden cookies 2% more often (with Starspawn, Starterror, Starlove) |
+  | Christmas | reindeer, each worth a minute of CpS (two with Ho ho ho-flavored frosting) |
+  | None | no switch once collecting is done |
+
+  Business Day is the default because more golden cookies help most in a setup built on clicking and golden cookies. With the autoclicker off, Christmas and its reindeer are the better home.
+- **Renewing the home season**: a season lasts 24 hours, so staying means a new switch every day, each half as much again as the last: about 7 minutes of CpS for the first, 37 by the fifth, over an hour after a week. AFK Baker switches to the home season, and renews it, **while that costs less than N minutes of CpS** (default 30). Past that it lets the season run out.
+- **Ascending mid-season** ends the season and the collection with it, as the game does; the next run starts the round again at the first switch's price. Auto seasons never holds an ascension back, and buys nothing once the ascend threshold is reached. In a Born again run, or without Season switcher, it only collects in a season the calendar brings.
+- **Only what you can see**: it looks at what is unlocked and bought, the season and its timer, and prices. Every drop is the game's own roll, when AFK Baker clicks a reindeer or a golden cookie or pops a wrinkler as it always does.
+- The **Seasons tab** shows, per season, what is collected, what is missing by name, and where it stands in the plan. The Dashboard row shows the current season and its time left, what it is collecting, and what comes next.
+
 **Stats**
 - **Count where cookies come from** (on by default): for the current run, how many cookies came from each source, as a share of everything gained:
   - buildings, split into production at your CpS without buffs and the extra under buffs such as Frenzy and building specials;
@@ -292,6 +329,7 @@ The Dashboard shows, for each feature:
 - the Grimoire: magic (current / max), the spell, what the cast is waiting for, and the last cast with its result, e.g. `Cast Force the Hand of Fate: Frenzy`. The result appears once the summoned cookie has been clicked
 - your progress toward the ascend threshold, plus the guard warning (red dot) when it's active
 - with a grandmapocalypse limit set, where research stops and the grandmas' stage now, or your options once they are past it
+- with Auto seasons on, the current season and its time left, what is being collected, what comes next, and any season that is waiting with the reason
 - with Godzamok combos on, the running Devastation or what the next combo is waiting for, and the last combo with its cost
 
 ## Only what you can see
