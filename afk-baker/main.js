@@ -7,7 +7,7 @@
 	'use strict';
 
 	const MOD_ID = 'afk baker';
-	const VERSION = '2.3.0';
+	const VERSION = '3.0.0';
 	// Settings saved before a default changed are reset to the new default:
 	// v1 had auto-ascend on, v2 had Elder Pledge on, v3 had the Auto reserve.
 	const SETTINGS_VERSION = 4;
@@ -64,7 +64,10 @@
 	const SEASON_TOGGLES = { valentines: 'seasonValentines', christmas: 'seasonChristmas', halloween: 'seasonHalloween', easter: 'seasonEaster' };
 	// Where to stay once nothing is left to collect.
 	const HOME_SEASONS = { fools: 'Business Day', none: 'None', christmas: 'Christmas', halloween: 'Halloween', valentines: "Valentine's Day", easter: 'Easter' };
+	// When Force the Hand of Fate is cast, once the magic meter is full.
+	const GRIMOIRE_TIMINGS = { full: 'When magic is full', buff: 'During a Frenzy or click buff', click: 'Only during a click buff' };
 	const CYCLE_OPTIONS = {
+		grimoireTiming: GRIMOIRE_TIMINGS,
 		grandmaLimit: GRANDMA_LIMITS,
 		godzamokMode: GODZAMOK_MODES,
 		homeSeason: HOME_SEASONS,
@@ -298,7 +301,7 @@
 		redFox: 'RedFox', sunder: 'Sunder', sunderRate: 'Sunder: pets per second', autoTrade: 'Auto-trade stocks', marketStrategy: 'Stock strategy', marketBuyPercent: 'Buy at % of resting value',
 		marketSellPercent: 'Sell at % of resting value', marketBankPercent: '% of the bank the market may use', marketSellAtLoss: 'Sell at a loss',
 		autoBrokers: 'Hire brokers', autoOffice: 'Upgrade office', officeMinutes: 'Office upgrade limit, minutes of CpS', autoCast: 'Auto-cast spell',
-		grimoireSpell: 'Spell', trackIncome: 'Count where cookies come from', autoAscend: 'Auto-ascend', ascendMode: 'Threshold type', ascendThreshold: 'Ascend threshold', debug: 'Debug logging',
+		grimoireSpell: 'Spell', grimoireTiming: 'Cast Force the Hand of Fate', trackIncome: 'Count where cookies come from', autoAscend: 'Auto-ascend', ascendMode: 'Threshold type', ascendThreshold: 'Ascend threshold', debug: 'Debug logging',
 	};
 
 	const DEFAULTS = {
@@ -357,6 +360,7 @@
 		officeMinutes: 30,
 		autoCast: false,
 		grimoireSpell: 'hand of fate',
+		grimoireTiming: 'full',
 		autoAscend: false,
 		ascendMode: 'gained',
 		ascendThreshold: 1000,
@@ -3193,12 +3197,36 @@
 
 	// Why the spell isn't being cast right now, or '' if it can be. Magic regenerates faster the fuller
 	// the meter is and stops at full, so casting from a full meter gives the most casts.
-	function castHoldReason(M, spell) {
+	function castHoldReason(M, spell, byAddOn) {
 		const cost = M.getSpellCost(spell);
 		if (cost > M.magicM) return `max magic is too low for this spell (it costs ${Beautify(cost)})`;
 		if (spell === M.spells['hand of fate'] && !settings().clickGolden) return 'golden cookie clicking is off, so the summoned cookie would go to waste';
 		if (M.magic < M.magicM) return 'waiting for full magic';
+		// An add-on that picks the spell has made its own plan for when.
+		if (spell === M.spells['hand of fate'] && !byAddOn) {
+			const timing = castTimingReason();
+			if (timing) return timing;
+		}
 		return raisedBackfireReason(spell);
+	}
+
+	// The player's timing for Force the Hand of Fate: what it is waiting for at full magic, or ''. What
+	// the spell gives (a Frenzy, a Click frenzy, a building special) stacks on a buff already running,
+	// so a cast during one is worth more. Only the buffs on screen are looked at.
+	function castTimingReason() {
+		const timing = settings().grimoireTiming;
+		if (timing === 'full') return '';
+		let cps = false;
+		let click = false;
+		for (const name in Game.buffs) {
+			// Devastation comes from Godzamok combos, every ten seconds; it is not what to wait for.
+			if (name === 'Devastation') continue;
+			const buff = Game.buffs[name];
+			if (typeof buff.multClick === 'number' && buff.multClick > 1) click = true;
+			if (typeof buff.multCpS === 'number' && buff.multCpS > 1) cps = true;
+		}
+		if (click || (timing === 'buff' && cps)) return '';
+		return timing === 'buff' ? 'waiting for a Frenzy, a building special or a click buff' : 'waiting for a click buff (Click frenzy or Dragonflight)';
 	}
 
 	// Seconds until the meter is full. Mirrors M.logic: each frame adds 0.002 x sqrt(magic / max), with
@@ -3286,8 +3314,8 @@
 		}
 		const M = grimoire();
 		if (!M || !settings().autoCast) return;
-		const spell = spellChoice(M).spell;
-		if (spell && !castHoldReason(M, spell)) castSpell(M, spell);
+		const choice = spellChoice(M);
+		if (choice.spell && !castHoldReason(M, choice.spell, choice.byAddOn)) castSpell(M, choice.spell);
 	}
 
 	/* =====================================================================
@@ -4955,7 +4983,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 				line += 'An add-on is holding the cast.';
 			} else {
 				const name = choice.spell.name + (choice.byAddOn ? ' (picked by an add-on)' : '');
-				const hold = castHoldReason(M, choice.spell);
+				const hold = castHoldReason(M, choice.spell, choice.byAddOn);
 				line += hold ? `${name}: ${hold}.` : `Casting ${name}.`;
 			}
 		}
@@ -5158,6 +5186,14 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 				hint('It waits while a golden cookie is on screen or Magic inept is active (both raise the backfire chance), and while golden cookie clicking is off. The wrath cookie from a backfire is left alone.') :
 			'<label>Conjure Baked Goods gives 30 minutes of CpS.</label>' +
 				hint('The payout is capped at 15% of your bank, so it is weak when auto-buy keeps the bank low.'));
+		if (s.grimoireSpell === 'hand of fate') {
+			html += listing(cycleButton('grimoireTiming', 'Cast') +
+				hint('What the spell gives (a Frenzy, a Click frenzy, a building special) adds to a buff already running, so a cast during one is worth more. ' +
+					'When magic is full: casts at once, for the most casts. ' +
+					'During a Frenzy or click buff: at full magic it waits until a buff that raises CpS (Frenzy, Dragon Harvest, a building special, Elder frenzy) or a click buff is running. Late in a run a Frenzy is running most of the time, so few casts are lost. ' +
+					'Only during a click buff: it waits for a Click frenzy or a Dragonflight. This is high-variance. There are about a third fewer casts and a typical hour looks the same, but once in a while the spell lands a building special or a Frenzy on top of the click buff, and those rare casts are worth more than all the others together. ' +
+					'Magic does not regenerate while it waits at full. Devastation from Godzamok combos does not count as a click buff here. It only looks at the buffs on screen, never at what the spell will give.'));
+		}
 		return html;
 	}
 
@@ -5838,9 +5874,9 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		let dot = s.autoCast ? 'on' : 'off';
 		if (s.autoCast && M) {
 			const choice = spellChoice(M);
-			const hold = choice.spell ? castHoldReason(M, choice.spell) : 'an add-on to allow the cast';
+			const hold = choice.spell ? castHoldReason(M, choice.spell, choice.byAddOn) : 'an add-on to allow the cast';
 			if (M.magic < M.magicM) wait = `a full magic meter (${formatDuration(secondsToFullMagic(M) * 1000)})`;
-			else if (hold) wait = hold;
+			else if (hold) wait = hold.replace(/^waiting for /, '');
 			if (wait) dot = 'wait';
 		} else if (s.autoCast) {
 			dot = 'wait';

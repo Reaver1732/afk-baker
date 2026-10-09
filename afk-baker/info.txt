@@ -3,9 +3,9 @@
 	"ID": "afk baker",
 	"Author": "Reaver",
 	"Description": "Plays Cookie Clicker while you're away: autoclicker, golden cookies, reindeer, wrinklers, fortunes, auto-buy by payback period (worked out with the game's own CpS code) with ratings shown in the store, sugar lump harvesting and building levels, dragon training, auras and petting, Pantheon gods and Godzamok combos, Stock Market trading, Grimoire spells, seasons collected every run, income stats per run, and auto-ascend, all from its own panel. No other mods needed.",
-	"ModVersion": "2.3.0",
+	"ModVersion": "3.0.0",
 	"GameVersion": 2.053,
-	"Date": "07/10/2026",
+	"Date": "08/10/2026",
 	"Dependencies": [],
 	"AllowSteamAchievs": 1
 }
