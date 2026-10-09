@@ -4123,8 +4123,14 @@
 					} else if (plant.key !== want) {
 						// Weeds and fungi go at once. Another plant only makes way when the tile is to stay
 						// empty or its own plant can go in now: a growing plant beats a bare tile.
-						if (plant.weed || plant.fungus || !want || !plantHold(M, M.plants[want], spare)) plan.harvest.push({ x: x, y: y, plant: plant, why: 'not in the layout' });
-						else plan.misplaced = (plan.misplaced || 0) + 1;
+						const hold = want ? plantHold(M, M.plants[want], spare) : '';
+						if (plant.weed || plant.fungus || !hold) {
+							plan.harvest.push({ x: x, y: y, plant: plant, why: 'not in the layout' });
+						} else {
+							// The tile keeps its plant for now; what the layout's own plant waits for is shown all the same.
+							plan.misplaced = (plan.misplaced || 0) + 1;
+							plan.waiting[hold] = (plan.waiting[hold] || 0) + 1;
+						}
 					} else {
 						plan.planted++;
 						plan.names[plant.name] = (plan.names[plant.name] || 0) + 1;
