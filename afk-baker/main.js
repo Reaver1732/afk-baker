@@ -417,7 +417,9 @@
 		seasonRenewMinutes: 30,
 		autoGarden: false,
 		gardenSoil: 'clay',
-		gardenLimitMinutes: 5,
+		// Enough for every seed in the chain to golden clover (cronerice and gildmillet cost 15). Golden
+		// clover itself costs 125, which only a bakery that clicks hard earns back; that is the player's call.
+		gardenLimitMinutes: 15,
 		autoTrade: false,
 		marketStrategy: 'restingGuide',
 		marketBuyPercent: 30,
@@ -4089,7 +4091,7 @@
 		const minutes = plantMinutes(M, plant);
 		// A seed's price is a fixed number of minutes of CpS (thumbcorn 5, golden clover 125), so the
 		// limit decides which plants may be planted at all. A price right at the limit counts as under it.
-		if (minutes > s.gardenLimitMinutes * (1 + 1e-9)) return `a higher limit: ${plant.name} costs ${Beautify(Math.ceil(minutes - 1e-9))} min of CpS, over your ${s.gardenLimitMinutes}`;
+		if (minutes > s.gardenLimitMinutes * (1 + 1e-9)) return `a higher planting limit: a ${plant.name} seed costs ${Beautify(Math.ceil(minutes - 1e-9))} min of CpS, and your limit is ${s.gardenLimitMinutes}`;
 		if (cost > spare) return `${Beautify(cost - spare)} more cookies`;
 		// The same rule as the no-payback upgrades: never hold up what auto-buy is saving for, unless that
 		// is further off than the limit anyway.
@@ -4235,6 +4237,8 @@
 		const plan = gardenPlan(M);
 		const names = Object.keys(plan.names).map(function (name) { return `${plan.names[name]} ${name}`; }).join(', ');
 		row.now = (plan.goal.note ? plan.goal.note + ' ' : '') + `${plan.planted} of ${plan.wanted} tiles planted${names ? ' (' + names + ')' : ''}. Soil: ${M.soilsById[M.soil].name}. Next tick in ${formatDuration(Math.max(0, M.nextStep - Date.now()))}.`;
+		const better = plan.goal.mode === 'farm' && s.gardenLayout.indexOf(GARDEN_AUTO) !== -1 ? gardenBetter(M) : null;
+		if (better) row.now += ` ${better.name} is not planted: a seed costs ${Beautify(Math.ceil(plantMinutes(M, better) - 1e-9))} min of CpS, and your planting limit is ${s.gardenLimitMinutes}.`;
 		if (plan.misplaced) row.now += ` ${plan.misplaced} tile${plan.misplaced === 1 ? ' keeps' : 's keep'} another plant until the layout's can be planted.`;
 		if (plan.growing.length) row.now += ` Letting ${plan.growing.join(', ')} mature for the seed.`;
 		if (state.lastGardenAction) row.now += ` Last: ${state.lastGardenAction}.`;
@@ -6198,9 +6202,69 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		const s = settings();
 		s.gardenLayout = s.gardenLayout.map(function (tile, i) {
 			if (preset === 'best') return GARDEN_AUTO;
-			if (preset === 'half') return (i % GARDEN_SIZE) % 2 === 0 ? 'thumbcorn' : 'goldenClover';
+			if (preset === 'half') return (i % GARDEN_SIZE + Math.floor(i / GARDEN_SIZE)) % 2 === 0 ? 'thumbcorn' : 'goldenClover';
 			return preset === 'clear' ? '' : preset;
 		});
+	}
+
+	// What keeping plants replanted costs, in minutes of CpS per hour, on the layout's soil: each seed's
+	// price over the plant's average life. `counts` is { plant key: tiles }.
+	function gardenUpkeep(M, counts) {
+		const soil = M.soils[settings().gardenSoil] || M.soilsById[M.soil];
+		let minutes = 0;
+		for (const key in counts) {
+			const plant = M.plants[key];
+			const lifeHours = 100 / (plant.ageTick + plant.ageTickR / 2) * soil.tick / 60;
+			minutes += counts[key] * plantMinutes(M, plant) / lifeHours;
+		}
+		return minutes;
+	}
+
+	// The player's average income, in minutes of CpS per hour, from the Stats count: this run once an hour
+	// of it is counted, else the last finished run. null with neither.
+	function averageIncome() {
+		const run = mod.income.run;
+		let seconds = 0;
+		for (const key in run.setups) seconds += run.setups[key];
+		let multiplier = settings().trackIncome && seconds >= 3600 ? incomeMultiplier(liveRecord()) : null;
+		let from = 'this run';
+		if (multiplier === null && mod.income.history.length) {
+			multiplier = incomeMultiplier(mod.income.history[0]);
+			from = 'your last run';
+		}
+		return multiplier === null ? null : { minutes: multiplier * 60, from: from };
+	}
+
+	// The presets with golden clover say what they cost to keep up, since that is only worth it with heavy clicking.
+	function presetTip(M, preset) {
+		if (preset !== 'goldenClover' && preset !== 'half') return '';
+		const s = settings();
+		const counts = { goldenClover: 0, thumbcorn: 0 };
+		for (let i = 0; i < GARDEN_SIZE * GARDEN_SIZE; i++) {
+			if (!M.isTileUnlocked(i % GARDEN_SIZE, Math.floor(i / GARDEN_SIZE))) continue;
+			counts[preset === 'half' && (i % GARDEN_SIZE + Math.floor(i / GARDEN_SIZE)) % 2 === 0 ? 'thumbcorn' : 'goldenClover']++;
+		}
+		if (!counts.thumbcorn) delete counts.thumbcorn;
+		const clover = M.plants.goldenClover;
+		const upkeep = gardenUpkeep(M, counts);
+		const income = averageIncome();
+		const what = preset === 'half' ? `${counts.goldenClover} golden clovers and ${counts.thumbcorn} thumbcorns` : `${counts.goldenClover} golden clovers`;
+		let text = 'This only pays off with heavy clicking. Golden clover makes golden cookies come more often, which is worth a lot when most of your income is clicks under Frenzies and click buffs, and little to a bakery that idles. Its seed is dear: ' +
+			`${Beautify(Math.ceil(plantMinutes(M, clover) - 1e-9))} minutes of CpS, for a plant that lives a few hours. ` +
+			`On this save now, keeping ${what} planted on ${(M.soils[s.gardenSoil] || M.soilsById[M.soil]).name} costs about ${Beautify(Math.round(upkeep))} minutes of CpS an hour. `;
+		if (!Number.isFinite(upkeep)) text = text.replace(/On this save now.*$/, '');
+		else if (!income) text += 'There is not yet an hour of income counted in the Stats tab to compare that with. ';
+		else if (upkeep >= income.minutes) text += `That is more than your whole income, which averaged about ${Beautify(Math.round(income.minutes))} minutes of CpS an hour (Stats tab, ${income.from}). `;
+		else text += `Your income averaged about ${Beautify(Math.round(income.minutes))} minutes of CpS an hour (Stats tab, ${income.from}), so the upkeep is about ${(upkeep / income.minutes * 100 < 1 ? (upkeep / income.minutes * 100).toFixed(1) : Math.round(upkeep / income.minutes * 100))}% of it. `;
+		const minutes = plantMinutes(M, clover);
+		if (minutes > s.gardenLimitMinutes * (1 + 1e-9)) text += `It also needs a planting limit of ${Beautify(Math.ceil(minutes - 1e-9))} or more; yours is ${s.gardenLimitMinutes}.`;
+		return text;
+	}
+
+	function presetButton(M, preset) {
+		const text = presetTip(M, preset);
+		const tip = text ? ' ' + Game.getTooltip(`<div style="padding:8px;width:320px;font-size:11px;line-height:1.35;">${escapeHtml(text)}</div>`, 'this') : '';
+		return `<a class="smallFancyButton option" data-afk-action="garden-preset-${preset}"${tip}>${GARDEN_PRESETS[preset]}</a>`;
 	}
 
 	// A plant's picture from the game's own sprite sheet (loaded from the game at run time): its mature stage.
@@ -6239,7 +6303,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		}
 		return listing('<label>Pick a plant, then click tiles to put it there. Tiles outside your plot are dimmed: they are used once the Farm\'s level opens them.</label>') +
 			`<div class="afk-brushes">${brushes}</div><div class="afk-garden-grid">${grid}</div>` +
-			listing('<label>Presets:</label> ' + Object.keys(GARDEN_PRESETS).map(function (key) { return actionButton('garden-preset-' + key, GARDEN_PRESETS[key]); }).join(''));
+			listing('<label>Presets:</label> ' + Object.keys(GARDEN_PRESETS).map(function (key) { return presetButton(M, key); }).join(''));
 	}
 
 	function gardenUnlockHtml(M) {
@@ -6300,7 +6364,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		html += listing(cycleButton('gardenSoil', 'Soil') +
 				hint('Clay makes plant effects 25% stronger and ticks every 15 minutes, so plants also live three times as long: the soil for a layout you want to keep. Dirt ticks every 5 minutes. Fertilizer ticks every 3 minutes with effects at 75%. Pebbles and wood chips cut effects to 25%. Fertilizer needs 50 Farms, clay 100, pebbles 200, wood chips 300, and the soil can be changed once every 10 minutes; AFK Baker changes it as soon as the game allows.')) +
 			listing(`<label>Plant a seed when it costs</label> ${numberInput('gardenLimitMinutes', 50)}<label>minutes of CpS or less</label>` +
-				hint('A seed\'s price is a fixed number of minutes of your CpS: baker\'s wheat 1, thumbcorn 5, cronerice and gildmillet 15, clover 25, golden clover 125. So this limit decides which plants AFK Baker will plant at all. Seeds are priced on your CpS as it is at that moment, so nothing is planted while a Frenzy or another CpS buff is running. A seed is only bought with cookies above your cookie reserve, and never when that would hold up what auto-buy is saving for, unless that is further away than this limit anyway.'));
+				hint('A seed\'s price is a fixed number of minutes of your CpS: baker\'s wheat 1, thumbcorn 5, cronerice and gildmillet 15, clover 25, golden clover 125. So this limit decides which plants AFK Baker will plant at all. Seeds are priced on your CpS as it is at that moment, so nothing is planted while a Frenzy or another CpS buff is running. A seed is only bought with cookies above your cookie reserve, and never when that would hold up what auto-buy is saving for, unless that is further away than this limit anyway. The default of 15 covers every seed in the chain to golden clover. Golden clover itself, at 125, is left to you: it only pays for itself in a bakery that clicks hard (see the All golden clover preset).'));
 		if (over.length) {
 			html += listing(`<label style="color:#fc9;">Over the limit, so not planted: ${over.map(function (plant) { return `${escapeHtml(plant.name)} (${Beautify(Math.ceil(plantMinutes(M, plant) - 1e-9))} min of CpS a seed)`; }).join(', ')}. Raise the limit to plant ${over.length === 1 ? 'it' : 'them'}.</label>`);
 		}

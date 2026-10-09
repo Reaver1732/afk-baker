@@ -272,7 +272,7 @@ How the market works, in short:
   - **Best I have** (the default for every tile): golden clover, else thumbcorn, else baker's wheat, taking the best one whose seed is within the planting limit. This is the order for a bakery that lives on clicks and golden cookies.
   - **Presets**: Best I have, All thumbcorn, All golden clover, Half and half, Clear.
 - **Soil** (default clay): clay makes plant effects 25% stronger and ticks every 15 minutes, so plants also live three times as long. It needs 100 Farms; the soil is changed as soon as the Farm count and the game's 10-minute cooldown allow.
-- **Planting limit** ("Plant a seed when it costs N minutes of CpS or less", default 5): **a seed's price is a fixed number of minutes of your CpS**, so this limit decides which plants are planted at all.
+- **Planting limit** ("Plant a seed when it costs N minutes of CpS or less", default 15): **a seed's price is a fixed number of minutes of your CpS**, so this limit decides which plants are planted at all.
 
   | Seed | Minutes of CpS |
   |---|---|
@@ -282,7 +282,9 @@ How the market works, in short:
   | Clover | 25 |
   | Golden clover | 125 |
 
-  - With the default of 5, baker's wheat and thumbcorn are planted and nothing dearer. **Golden clover needs a limit of 125 or more**, and the chain that unlocks it needs 15. The Garden tab says so in plain words whenever a plant in your layout, or in the chain, is over the limit.
+  - The default of 15 covers baker's wheat, thumbcorn, cronerice and gildmillet: the cheap plants, and every seed in the chain that unlocks golden clover.
+  - **Planting golden clover needs a limit of 125 or more, and that is left to you.** A field of 20 costs about 1,000 minutes of CpS an hour to keep planted (16 seconds of CpS every second). A bakery that clicks hard earns that back many times over; an idle one would spend several times its income on seeds. The "All golden clover" and "Half and half" presets say so in their tooltips, with the upkeep on your save and, once the Stats tab has an hour of income counted, what share of your average income that is.
+  - Whenever the limit keeps a plant out, the Dashboard and the Garden tab name the plant, its price and your limit.
   - Seeds are priced on your CpS **as it is at that moment**, so nothing is planted while a Frenzy or another CpS buff is running.
   - A seed is only bought with cookies above the cookie reserve, and never when that would hold up what auto-buy is saving for, unless that is further away than the limit anyway (the same rule as the no-payback upgrades).
 - **What to plant.** For a bakery whose income is clicks and click buffs, measured on such a save:
@@ -293,7 +295,7 @@ How the market works, in short:
   | Clover | golden cookies 19% more often | about x1.24 |
   | Golden clover | golden cookies 46% more often | about x2.4 |
 
-  More golden cookies means more Frenzies and click buffs, and more of them on top of each other, which is why golden clover wins by so much. A golden clover field costs about 16 seconds of CpS per second to keep planted. Nursetulips add under one point and aren't worth a tile.
+  More golden cookies means more Frenzies and click buffs, and more of them on top of each other, which is why golden clover wins by so much. A golden clover field costs about 16 seconds of CpS per second to keep planted, which is why it is only for a bakery that clicks hard. Nursetulips add under one point and aren't worth a tile.
 - **Seed to unlock** (default golden clover): new seeds come from mutations. An empty tile next to the right mature plants sometimes sprouts a new one, and harvesting that once mature gives you its seed for good, through every ascension.
   - Pick a seed and AFK Baker works through the **chain** from the seeds you have. For golden clover from baker's wheat that is thumbcorn, cronerice, gildmillet, golden clover.
   - For each step it plants the parents in the pattern that leaves the most empty tiles next to them, uses **wood chips** (three tries a tick) when you have 300 Farms, keeps those tiles clear, lets each new plant mature, harvests it, and moves on. Seeds that turn up on the way are kept too.
