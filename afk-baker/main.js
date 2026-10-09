@@ -264,6 +264,51 @@
 	// The Juicy queenbeet: it can't be planted, and is always left to mature for its sugar lump.
 	const GARDEN_LUMP_PLANT = 'queenbeetLump';
 	const GARDEN_SOUND = /^snd\/(tillb\d|harvest\d|toneTick)\.mp3$/;
+	// How each seed is come by, mirrored by hand from M.getMuts and the meddleweed's onKill in
+	// minigameGarden.js. needs: the mature plants an empty tile must have around it (its 8 neighbours);
+	// max: no more of that plant than this around it, mature or not; chance: per try. Where the game has
+	// several ways to a seed, this is the likeliest. weeds: sprouts in an empty tile with nothing around
+	// it. uproot: left behind, one time in five at most, when that plant is uprooted old.
+	const GARDEN_RECIPES = {
+		thumbcorn: { needs: { bakerWheat: 2 }, chance: 0.05 },
+		cronerice: { needs: { bakerWheat: 1, thumbcorn: 1 }, chance: 0.01 },
+		gildmillet: { needs: { cronerice: 1, thumbcorn: 1 }, chance: 0.03 },
+		clover: { needs: { bakerWheat: 1, gildmillet: 1 }, chance: 0.03 },
+		goldenClover: { needs: { bakerWheat: 1, gildmillet: 1 }, chance: 0.0007 },
+		shimmerlily: { needs: { clover: 1, gildmillet: 1 }, chance: 0.02 },
+		elderwort: { needs: { shimmerlily: 1, cronerice: 1 }, chance: 0.01 },
+		bakeberry: { needs: { bakerWheat: 2 }, chance: 0.001 },
+		chocoroot: { needs: { bakerWheat: 1, brownMold: 1 }, chance: 0.1 },
+		whiteChocoroot: { needs: { chocoroot: 1, whiteMildew: 1 }, chance: 0.1 },
+		whiteMildew: { needs: { brownMold: 1 }, max: { brownMold: 1 }, chance: 0.5 },
+		brownMold: { uproot: 'meddleweed' },
+		meddleweed: { weeds: true, chance: 0.002 },
+		whiskerbloom: { needs: { shimmerlily: 1, whiteChocoroot: 1 }, chance: 0.01 },
+		chimerose: { needs: { shimmerlily: 1, whiskerbloom: 1 }, chance: 0.05 },
+		nursetulip: { needs: { whiskerbloom: 2 }, chance: 0.05 },
+		drowsyfern: { needs: { chocoroot: 1, keenmoss: 1 }, chance: 0.005 },
+		wardlichen: { needs: { cronerice: 1, whiteMildew: 1 }, chance: 0.005 },
+		keenmoss: { needs: { greenRot: 1, brownMold: 1 }, chance: 0.1 },
+		queenbeet: { needs: { chocoroot: 1, bakeberry: 1 }, chance: 0.01 },
+		queenbeetLump: { needs: { queenbeet: 8 }, chance: 0.001 },
+		duketater: { needs: { queenbeet: 2 }, chance: 0.001 },
+		crumbspore: { uproot: 'meddleweed' },
+		doughshroom: { needs: { crumbspore: 2 }, chance: 0.005 },
+		glovemorel: { needs: { crumbspore: 1, thumbcorn: 1 }, chance: 0.02 },
+		cheapcap: { needs: { crumbspore: 1, shimmerlily: 1 }, chance: 0.04 },
+		foolBolete: { needs: { doughshroom: 1, greenRot: 1 }, chance: 0.04 },
+		wrinklegill: { needs: { crumbspore: 1, brownMold: 1 }, chance: 0.06 },
+		greenRot: { needs: { whiteMildew: 1, clover: 1 }, chance: 0.05 },
+		shriekbulb: { needs: { wrinklegill: 1, elderwort: 1 }, chance: 0.001 },
+		tidygrass: { needs: { bakerWheat: 1, whiteChocoroot: 1 }, chance: 0.002 },
+		everdaisy: { needs: { tidygrass: 3, elderwort: 3 }, chance: 0.002 },
+		ichorpuff: { needs: { elderwort: 1, crumbspore: 1 }, chance: 0.002 },
+	};
+	// A plant grown to be uprooted for what it leaves behind is pulled at this age: the chance grows
+	// with age, and at 100 it would die instead and leave nothing.
+	const GARDEN_UPROOT_AGE = 84;
+	// The seed to unlock first, for a bakery that lives on golden cookies.
+	const GARDEN_DEFAULT_TARGET = 'goldenClover';
 	const GARDEN_PRESETS = { best: 'Best I have', thumbcorn: 'All thumbcorn', goldenClover: 'All golden clover', half: 'Half and half', clear: 'Clear' };
 	// Where "wrinkler" turns up on screen: tooltips, the menus, the news ticker, notifications, prompts,
 	// the dragon and Santa panel, and AFK Baker's own panel and tab.
@@ -318,7 +363,7 @@
 		autoPetDragon: 'Auto-pet dragon', autoPantheon: 'Auto-Pantheon', pantheonDiamond: 'Pantheon: Diamond slot', pantheonRuby: 'Pantheon: Ruby slot', pantheonJade: 'Pantheon: Jade slot', godzamokCombo: 'Godzamok combos', godzamokMode: 'Godzamok combos: when', godzamokCapPercent: 'Godzamok combos: limit, % of the bank',
 		autoSeasons: 'Auto seasons', seasonValentines: "Auto seasons: Valentine's Day", seasonChristmas: 'Auto seasons: Christmas', seasonHalloween: 'Auto seasons: Halloween', seasonEaster: 'Auto seasons: Easter',
 		homeSeason: 'Home season', seasonRenewMinutes: 'Home season: renewal limit, minutes of CpS',
-		autoGarden: 'Auto-garden', gardenSoil: 'Garden soil', gardenLimitMinutes: 'Garden: planting limit, minutes of CpS', gardenLayout: 'Garden layout',
+		autoGarden: 'Auto-garden', gardenTarget: 'Garden: seed to unlock', gardenSoil: 'Garden soil', gardenLimitMinutes: 'Garden: planting limit, minutes of CpS', gardenLayout: 'Garden layout',
 		redFox: 'RedFox', sunder: 'Sunder', sunderRate: 'Sunder: pets per second', autoTrade: 'Auto-trade stocks', marketStrategy: 'Stock strategy', marketBuyPercent: 'Buy at % of resting value',
 		marketSellPercent: 'Sell at % of resting value', marketBankPercent: '% of the bank the market may use', marketSellAtLoss: 'Sell at a loss',
 		autoBrokers: 'Hire brokers', autoOffice: 'Upgrade office', officeMinutes: 'Office upgrade limit, minutes of CpS', autoCast: 'Auto-cast spell',
@@ -481,6 +526,8 @@
 		settings.storeOverlay = raw && typeof raw.storeOverlay === 'boolean' ? raw.storeOverlay : null;
 		settings.overlayColors = sanitizeColors(raw && raw.overlayColors);
 		settings.gardenLayout = sanitizeGardenLayout(raw && raw.gardenLayout);
+		// '' for none. The key is checked against the garden when it is there.
+		settings.gardenTarget = raw && typeof raw.gardenTarget === 'string' && hasKey(GARDEN_RECIPES, raw.gardenTarget) ? raw.gardenTarget : raw && raw.gardenTarget === '' ? '' : GARDEN_DEFAULT_TARGET;
 		// God keys are checked against the Pantheon when it is there; here only their form, and no god twice.
 		const seenGods = {};
 		for (const key of PANTHEON_SLOT_KEYS) {
@@ -3874,9 +3921,143 @@
 		return null;
 	}
 
-	// What the garden should be doing: the plant wanted on every tile of the grid ('' for none) and the soil.
+	// The seeds still to unlock on the way to `target`, in the order to do them, ending with the target.
+	// Empty if the player has it, or there is no way to it from here.
+	function unlockChain(M, target) {
+		const chain = [];
+		const visit = function (key, depth) {
+			const plant = M.plants[key];
+			if (!plant || plant.unlocked || chain.indexOf(key) !== -1) return !!plant;
+			const recipe = GARDEN_RECIPES[key];
+			if (!recipe || depth > 12) return false;
+			const parents = recipe.needs ? Object.keys(recipe.needs) : recipe.uproot ? [recipe.uproot] : [];
+			for (const parent of parents) {
+				if (!visit(parent, depth + 1)) return false;
+			}
+			chain.push(key);
+			return true;
+		};
+		return visit(target, 0) ? chain : [];
+	}
+
+	// Where to plant the parents so that as many empty tiles as possible have what the recipe needs
+	// around them. Tries rows, columns, rings and a sparse grid on the open part of the plot and keeps
+	// the best. Returns { wants, eligible }.
+	function unlockLayout(M, recipe) {
+		const species = Object.keys(recipe.needs);
+		const tiles = GARDEN_SIZE * GARDEN_SIZE;
+		const open = [];
+		for (let i = 0; i < tiles; i++) open.push(M.isTileUnlocked(i % GARDEN_SIZE, Math.floor(i / GARDEN_SIZE)));
+		const pick = function (n) { return species[((n % species.length) + species.length) % species.length]; };
+		const candidates = [];
+		const add = function (planted) {
+			candidates.push(open.map(function (isOpen, i) { return isOpen ? planted(i % GARDEN_SIZE, Math.floor(i / GARDEN_SIZE)) : ''; }));
+		};
+		for (const p of [0, 1]) {
+			for (const shift of [0, 1]) {
+				add(function (x, y) { return y % 2 === p ? pick(x + shift * Math.floor(y / 2)) : ''; });
+				add(function (x, y) { return x % 2 === p ? pick(y + shift * Math.floor(x / 2)) : ''; });
+			}
+			for (const q of [0, 1]) add(function (x, y) { return x % 2 === p && y % 2 === q ? '' : pick(x + y); });
+		}
+		for (let p = 0; p < 3; p++) {
+			for (let q = 0; q < 3; q++) add(function (x, y) { return x % 3 === p && y % 3 === q ? pick(Math.floor(x / 3) + Math.floor(y / 3)) : ''; });
+		}
+		let best = { wants: candidates[0], eligible: -1, planted: 0 };
+		for (const wants of candidates) {
+			let eligible = 0;
+			let planted = 0;
+			for (let i = 0; i < tiles; i++) {
+				if (!open[i]) continue;
+				if (wants[i]) {
+					planted++;
+					continue;
+				}
+				const around = {};
+				const x = i % GARDEN_SIZE;
+				const y = Math.floor(i / GARDEN_SIZE);
+				for (let dy = -1; dy <= 1; dy++) {
+					for (let dx = -1; dx <= 1; dx++) {
+						const nx = x + dx;
+						const ny = y + dy;
+						if ((!dx && !dy) || nx < 0 || ny < 0 || nx >= GARDEN_SIZE || ny >= GARDEN_SIZE) continue;
+						const key = wants[ny * GARDEN_SIZE + nx];
+						if (key) around[key] = (around[key] || 0) + 1;
+					}
+				}
+				const enough = species.every(function (key) { return (around[key] || 0) >= recipe.needs[key]; });
+				const notTooMany = !recipe.max || Object.keys(recipe.max).every(function (key) { return (around[key] || 0) <= recipe.max[key]; });
+				if (enough && notTooMany) eligible++;
+			}
+			if (eligible > best.eligible || (eligible === best.eligible && planted < best.planted)) best = { wants: wants, eligible: eligible, planted: planted };
+		}
+		return best;
+	}
+
+	// The best soil the Farms allow for a step: wood chips give three tries a tick; weeds grow best on
+	// fertilizer, and for a plant that only has to grow, the fastest tick wins.
+	function unlockSoil(M, recipe) {
+		const order = recipe.needs ? ['woodchips', 'fertilizer', 'dirt'] : ['fertilizer', 'dirt'];
+		for (const key of order) {
+			if (M.parent.amount >= M.soils[key].req) return key;
+		}
+		return 'dirt';
+	}
+
+	// Ticks a plant takes, on average, to reach an age.
+	function ticksToAge(plant, age) {
+		return age / (plant.ageTick + plant.ageTickR / 2);
+	}
+
+	// Roughly how many hours a step should take on its soil: the parents growing up, the wait for the
+	// roll, and the new plant maturing. Mutations are luck; the wait can easily be twice this or more.
+	function stepHours(M, key) {
+		const recipe = GARDEN_RECIPES[key];
+		const plant = M.plants[key];
+		const soil = M.soils[unlockSoil(M, recipe)];
+		let ticks = ticksToAge(plant, plant.mature);
+		if (recipe.needs) {
+			const layout = unlockLayout(M, recipe);
+			if (layout.eligible < 1) return Infinity;
+			const tries = layout.eligible * (soil.key === 'woodchips' ? 3 : 1);
+			ticks += Math.max.apply(null, Object.keys(recipe.needs).map(function (parent) { return ticksToAge(M.plants[parent], M.plants[parent].mature); }));
+			ticks += 1 / (1 - Math.pow(1 - recipe.chance, tries));
+		} else if (recipe.weeds) {
+			let open = 0;
+			for (let i = 0; i < GARDEN_SIZE * GARDEN_SIZE; i++) open += M.isTileUnlocked(i % GARDEN_SIZE, Math.floor(i / GARDEN_SIZE)) ? 1 : 0;
+			ticks += 1 / (1 - Math.pow(1 - recipe.chance * soil.weedMult, open));
+		} else {
+			// Each plant uprooted at that age leaves something 17% of the time, this seed's fungus half of those.
+			let open = 0;
+			for (let i = 0; i < GARDEN_SIZE * GARDEN_SIZE; i++) open += M.isTileUnlocked(i % GARDEN_SIZE, Math.floor(i / GARDEN_SIZE)) ? 1 : 0;
+			const perRound = 1 - Math.pow(1 - 0.2 * GARDEN_UPROOT_AGE / 100 / 2, open);
+			ticks += ticksToAge(M.plants[recipe.uproot], GARDEN_UPROOT_AGE) / perRound;
+		}
+		return ticks * soil.tick / 60;
+	}
+
+	// What the garden should be doing: the plant wanted on every tile of the grid ('' for none) and the
+	// soil. While the target seed is still missing, that is the current step of its chain; after that,
+	// the player's layout.
 	function gardenGoal(M) {
 		const s = settings();
+		const chain = s.gardenTarget ? unlockChain(M, s.gardenTarget) : [];
+		if (chain.length) {
+			const step = chain[0];
+			const recipe = GARDEN_RECIPES[step];
+			const goal = { mode: 'unlock', target: s.gardenTarget, chain: chain, step: step, soil: unlockSoil(M, recipe), wants: Array(GARDEN_SIZE * GARDEN_SIZE).fill(''), eligible: 0, wait: '' };
+			if (recipe.needs) {
+				const layout = unlockLayout(M, recipe);
+				goal.wants = layout.wants;
+				goal.eligible = layout.eligible;
+				if (layout.eligible < 1) goal.wait = `a bigger plot: ${M.plants[step].name} needs more room than a Farm of this level gives`;
+			} else if (recipe.uproot) {
+				goal.wants = goal.wants.map(function () { return recipe.uproot; });
+				goal.uproot = recipe.uproot;
+			}
+			goal.note = `Unlocking ${M.plants[s.gardenTarget].name}: ${chain.length === 1 ? 'last step' : chain.length + ' steps to go'}, now ${M.plants[step].name}.`;
+			return goal;
+		}
 		const best = gardenBest(M);
 		return {
 			mode: 'farm',
@@ -3947,7 +4128,11 @@
 					} else {
 						plan.planted++;
 						plan.names[plant.name] = (plan.names[plant.name] || 0) + 1;
-						if (mature && GARDEN_HARVEST_PLANTS.indexOf(plant.key) !== -1) plan.harvest.push({ x: x, y: y, plant: plant, why: 'mature' });
+						if (goal.mode === 'unlock') {
+							if (goal.uproot === plant.key && tile[1] >= GARDEN_UPROOT_AGE) plan.harvest.push({ x: x, y: y, plant: plant, why: 'old enough to leave a fungus behind' });
+						} else if (mature && GARDEN_HARVEST_PLANTS.indexOf(plant.key) !== -1) {
+							plan.harvest.push({ x: x, y: y, plant: plant, why: 'mature' });
+						}
 					}
 					continue;
 				}
@@ -6051,6 +6236,43 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			listing('<label>Presets:</label> ' + Object.keys(GARDEN_PRESETS).map(function (key) { return actionButton('garden-preset-' + key, GARDEN_PRESETS[key]); }).join(''));
 	}
 
+	function gardenUnlockHtml(M) {
+		const s = settings();
+		const locked = M.plantsById.filter(function (plant) { return !plant.unlocked && hasKey(GARDEN_RECIPES, plant.key); });
+		const options = ['<option value=""' + (s.gardenTarget ? '' : ' selected') + '>None: just farm the layout</option>']
+			.concat(M.plantsById.filter(function (plant) { return hasKey(GARDEN_RECIPES, plant.key) && (!plant.unlocked || plant.key === s.gardenTarget); }).map(function (plant) {
+				return `<option value="${plant.key}"${plant.key === s.gardenTarget ? ' selected' : ''}>${escapeHtml(plant.name)}${plant.unlocked ? ' (unlocked)' : ''}</option>`;
+			})).join('');
+		let html = heading('Seed to unlock') +
+			listing(`<label>Unlock</label> <select data-afk-garden-target style="${FIELD_STYLE}">${options}</select>` +
+				hint('New seeds come from mutations: an empty tile next to the right mature plants sometimes sprouts a new one, and harvesting that once mature gives you its seed for good, through every ascension. Pick a seed and AFK Baker works through the chain from the seeds you have: it plants the parents in the pattern that leaves the most empty tiles next to them, uses wood chips (three tries a tick) when you have 300 Farms, keeps those tiles clear, lets each new plant mature and harvests it, then moves to the next step. While it does, the garden gives next to no bonus. When the seed is yours it goes back to your layout by itself. Every roll is the game\'s own; nothing is reloaded or retried. An ascension wipes the plot, and the chain carries on from the seeds already unlocked. The planting limit applies to the parents too.'));
+		if (!s.gardenTarget) return html + listing(`<label>${locked.length} of ${M.plantsN} seeds are still locked. No seed is being unlocked; the layout below is farmed.</label>`);
+		const target = M.plants[s.gardenTarget];
+		if (!target) return html;
+		const goal = gardenGoal(M);
+		if (goal.mode !== 'unlock') {
+			return html + listing(`<label>${target.unlocked ? `You have the ${escapeHtml(target.name)} seed. The layout below is farmed.` : `There is no way to ${escapeHtml(target.name)} from the seeds you have.`}</label>`);
+		}
+		const all = [];
+		const first = function (key) { const recipe = GARDEN_RECIPES[key]; (recipe.needs ? Object.keys(recipe.needs) : recipe.uproot ? [recipe.uproot] : []).forEach(function (parent) { if (all.indexOf(parent) === -1) all.push(parent); }); };
+		goal.chain.forEach(first);
+		const chain = goal.chain.map(function (key, i) { return i === 0 ? `<b style="color:#fff;">${escapeHtml(M.plants[key].name)}</b>` : escapeHtml(M.plants[key].name); }).join(' &rarr; ');
+		const recipe = GARDEN_RECIPES[goal.step];
+		const how = recipe.needs ?
+			`from ${Object.keys(recipe.needs).map(function (key) { return (recipe.needs[key] > 1 ? recipe.needs[key] + ' ' : '') + escapeHtml(M.plants[key].name); }).join(' + ')}, ${Beautify(recipe.chance * 100, 2)}% a try on ${goal.eligible} tile${goal.eligible === 1 ? '' : 's'}` :
+			recipe.weeds ? 'a weed: it sprouts on an empty plot' : `left behind, sometimes, when an old ${escapeHtml(M.plants[recipe.uproot].name)} is uprooted`;
+		const hours = goal.chain.map(function (key) { return stepHours(M, key); });
+		const total = hours.reduce(function (sum, h) { return sum + h; }, 0);
+		const time = function (h) { return !Number.isFinite(h) ? 'not possible on this plot' : h < 1 ? `${Math.max(1, Math.round(h * 60))} minutes` : `${h < 10 ? h.toFixed(1) : Math.round(h)} hours`; };
+		html += listing(`<label>Chain: ${chain}</label>`) +
+			listing(`<label>Now: ${escapeHtml(M.plants[goal.step].name)} (${how}); ${goal.chain.length === 1 ? 'the last step' : goal.chain.length + ' steps to go'}. Soil: ${M.soils[goal.soil].name}. Roughly ${time(hours[0])} for this step and ${time(total)} for the whole chain, with average luck; a rare roll can take several times longer.</label>`);
+		const dear = all.filter(function (key) { return M.plants[key].plantable && plantMinutes(M, M.plants[key]) > s.gardenLimitMinutes * (1 + 1e-9); });
+		if (dear.length) {
+			html += listing(`<label style="color:#fc9;">This chain plants ${dear.map(function (key) { return `${escapeHtml(M.plants[key].name)} (${Beautify(Math.ceil(plantMinutes(M, M.plants[key]) - 1e-9))} min of CpS a seed)`; }).join(', ')}, over your planting limit of ${s.gardenLimitMinutes}. It will stop at that step until the limit is raised.</label>`);
+		}
+		return html;
+	}
+
 	// What the tab shows that moves on its own: when it changes, the tab is drawn again.
 	function gardenSignature(M) {
 		return M ? JSON.stringify([M.plantsById.map(function (plant) { return plant.unlocked ? 1 : 0; }).join(''), M.parent.level, gardenGoal(M).mode, gardenGoal(M).step || '', gardenBest(M)]) : 'none';
@@ -6080,7 +6302,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		if (better && s.gardenLayout.indexOf(GARDEN_AUTO) !== -1) {
 			html += listing(`<label style="color:#fc9;">"Best I have" is using ${gardenBest(M) ? escapeHtml(M.plants[gardenBest(M)].name) : 'nothing'}: you have the ${escapeHtml(better.name)} seed, but it costs ${Beautify(Math.ceil(plantMinutes(M, better) - 1e-9))} min of CpS, over the limit.</label>`);
 		}
-		return html + (typeof gardenUnlockHtml === 'function' ? gardenUnlockHtml(M) : '') + heading('Layout') + gardenLayoutHtml(M);
+		return html + gardenUnlockHtml(M) + heading(gardenGoal(M).mode === 'unlock' ? 'Layout (farmed once the seed is unlocked)' : 'Layout') + gardenLayoutHtml(M);
 	}
 
 	function updateGardenTab() {
@@ -6695,6 +6917,11 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		}
 		if (input.dataset && input.dataset.afkLumpField) {
 			onMenuInput(event);
+			return;
+		}
+		if (input.dataset && input.dataset.afkGardenTarget !== undefined) {
+			settings().gardenTarget = hasKey(GARDEN_RECIPES, input.value) ? input.value : '';
+			renderMenuSection();
 			return;
 		}
 		if (input.dataset && input.dataset.afkLumpTarget !== undefined) {
