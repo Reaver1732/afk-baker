@@ -1,6 +1,6 @@
 # AFK Baker
 
-A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building (1, 10 or 100 at a time) or upgrade by its own payback-period calculation, harvests and spends sugar lumps, trains Krumblor the dragon, trades on the Stock Market, casts Grimoire spells, collects the seasons, counts where your cookies come from, and ascends when you reach a prestige goal.
+A Cookie Clicker (Steam) mod that plays the game while you're away. It clicks, catches golden cookies, buys the most efficient building (1, 10 or 100 at a time) or upgrade by its own payback-period calculation, harvests and spends sugar lumps, trains Krumblor the dragon, trades on the Stock Market, casts Grimoire spells, tends the garden, collects the seasons, counts where your cookies come from, and ascends when you reach a prestige goal.
 
 It uses only the game's built-in mod API (`Game.registerMod`). CCSE is not needed.
 
@@ -13,7 +13,7 @@ Every feature can be turned on or off in **AFK Baker's own panel**. Open it with
 - The dot on the tab shows the state at a glance: green running, yellow paused, red when a safety check or an error stopped something.
 - **What auto-buy is doing**, next to the tab, without opening the panel: `Saving for 10x Fractal engine (2h 41m)`, `Bought 1x Cursor`, `Fast buying`, `Paused`, `Paused: safety check` or `Auto-buy off`. The time is how long the missing cookies take at your unbuffed CpS. It changes at most once a second, and clicking it opens the Auto-buy tab. It sits in the strip under the news ticker, so it never covers the news, and is cut short with an ellipsis on a narrow window. It has its own switch on the Auto-buy tab (on by default).
 - **Dashboard**: one row per feature with what it is doing now and what it is waiting for. Click a row to open its tab. Each settings tab shows its own rows at the top.
-- **Tabs**: Clickers, Auto-buy, Sugar lumps, Dragon, Pantheon, Stock Market, Grimoire, Auto-ascend, Seasons, Stats and Other. Explanations are behind the "?" next to a setting: hover it. A sub-setting is only shown while the setting it belongs to is on.
+- **Tabs**: Clickers, Auto-buy, Sugar lumps, Dragon, Pantheon, Stock Market, Grimoire, Garden, Auto-ascend, Seasons, Stats and Other. Explanations are behind the "?" next to a setting: hover it. A sub-setting is only shown while the setting it belongs to is on.
 - **Pause all** (top of the panel, on every tab): stops everything AFK Baker does without changing any setting. Resume picks up where it left off. The store ratings keep showing. A pause is not remembered when the game restarts, so a forgotten pause can't silently stop an AFK session.
 - **Settings export and import** (Other tab): Copy gives every setting as one line of text. To import, paste a text and press Check import. It lists what would change and changes nothing until you press Apply. The text is checked the same way a saved game's settings are. Auto-ascend is always imported switched off, so a pasted text can't trigger an ascension.
 - The panel is only redrawn when you do something, so a field you are typing in and a drag in progress are never interrupted.
@@ -245,11 +245,65 @@ How the market works, in short:
   - **Force the Hand of Fate** (default) summons a golden cookie, which the mod's golden cookie clicker then clicks. It costs 10 magic plus 60% of your max magic, and backfires 15% of the time.
   - **Conjure Baked Goods** gives 30 minutes of CpS, but **capped at 15% of your bank**, so it's weak when auto-buy keeps the bank low. It costs 2 magic plus 40% of your max, and backfires 15% of the time (a 15-minute Clot, and it takes cookies).
 - **It casts when the magic meter is full.** Magic regenerates faster the fuller the meter is and stops at full, so casting from a full meter gives the most casts and wastes nothing. For example, with 600 Wizard towers (max magic 106), Force the Hand of Fate comes round every 26 minutes cast from full, against 49 minutes if it were cast as soon as it's affordable.
+- **When to cast Force the Hand of Fate** (a setting, once magic is full). What the spell gives, a Frenzy, a Click frenzy or a building special, adds to a buff that is already running, so a cast during one is worth more.
+  - **When magic is full** (default): casts at once, for the most casts.
+  - **During a Frenzy or click buff**: waits at full magic until a buff that raises CpS (Frenzy, Dragon Harvest, a building special, Elder frenzy) or a click buff is running. Late in a run a Frenzy runs most of the time, so few casts are lost.
+  - **Only during a click buff**: waits for a Click frenzy or a Dragonflight. **This is high-variance.** There are about a third fewer casts and a typical hour looks the same, but once in a while the spell lands a building special or a Frenzy on top of the click buff, and those rare casts are worth more than all the others together. It suits a bakery that lives on clicks; the gain shows over days, not hours.
+  - Magic doesn't regenerate while it waits at full. Devastation from Godzamok combos doesn't count as a click buff here. A golden cookie on screen still holds the cast.
+  - It looks only at the buffs on screen, never at what the spell will give. The numbers behind this came from running the game on a save for about 1,100 game hours: with a click-heavy setup the expected value of the casts was about twice as high during a Frenzy or click buff and about twenty times as high during a click buff only, nearly all of it from one cast in twenty.
 - **It holds the cast while the backfire chance is raised**, which the spell's tooltip shows: a golden or wrath cookie already on screen adds 15% each to Force the Hand of Fate, and the Magic inept buff multiplies every spell's chance by 5.
 - **A backfired Force the Hand of Fate** summons a wrath cookie, usually a Clot or a Ruin. The mod leaves that one cookie alone, even with "Include wrath cookies" on. Other wrath cookies are clicked as usual.
 - It holds Force the Hand of Fate while **golden cookie clicking is off**, because nothing would click the summoned cookie. The Dashboard says so.
 - It doesn't cast during the ascend animation, on the ascension screen, or in a Born again run. Your max magic depends on how many Wizard towers you own, so it's low at the start of each run, and the Dashboard says when it's too low for the spell.
 - **No cheating.** The same rule as the Stock Market: the mod only uses what a player can see, which here is the magic meter, the spell's cost, the backfire chance in its tooltip, the cookies on screen and your buffs. The game decides every spell's outcome in advance from the run's seed and your lifetime spell count, which is what spell planners read. AFK Baker never reads either one, never simulates a cast, and never looks at what a summoned cookie will do before it's clicked. It learns of a backfire the way you do, from the game's own backfire announcement.
+
+**Garden** (the Farm minigame; nothing happens until it's unlocked by giving the Farm a level)
+
+**The plot is wiped on every ascension, and the soil goes back to dirt.** That's how the game works. Your seeds are kept. Auto-garden plants your layout again each run.
+
+- **Auto-garden** (off by default): keeps a layout planted. You pick a plant for each tile and a soil; AFK Baker does the rest.
+  - It **plants** the empty tiles and **replants** what dies of old age.
+  - It **uproots** weeds, fungi and anything else that isn't in the layout. A plant other than a weed only makes way once the layout's own plant can actually be planted: a growing plant beats a bare tile.
+  - Plants are **left to live out their life**: a plant's effect is 10%, 25%, 50% and then 100% as it grows, so nothing is harvested early.
+  - Plants that **pay when harvested mature** (bakeberry, chocoroot, white chocoroot, queenbeet, duketater) are harvested then and replanted. A **Juicy queenbeet** is always left to mature and harvested for its sugar lump.
+  - A plant **whose seed you don't have** is left to mature and then harvested, which gives you the seed for good.
+  - It never freezes the garden, does nothing while you have frozen it, and never spends sugar lumps.
+- **Layout** (Garden tab): the whole 6x6 grid, with the tiles outside your plot dimmed (they are used once the Farm's level opens them). Pick a plant, then click tiles. Only seeds you have can be picked.
+  - **Best I have** (the default for every tile): golden clover, else thumbcorn, else baker's wheat, taking the best one whose seed is within the planting limit. This is the order for a bakery that lives on clicks and golden cookies.
+  - **Presets**: Best I have, All thumbcorn, All golden clover, Half and half, Clear.
+- **Soil** (default clay): clay makes plant effects 25% stronger and ticks every 15 minutes, so plants also live three times as long. It needs 100 Farms; the soil is changed as soon as the Farm count and the game's 10-minute cooldown allow.
+- **Planting limit** ("Plant a seed when it costs N minutes of CpS or less", default 5): **a seed's price is a fixed number of minutes of your CpS**, so this limit decides which plants are planted at all.
+
+  | Seed | Minutes of CpS |
+  |---|---|
+  | Baker's wheat | 1 |
+  | Thumbcorn | 5 |
+  | Cronerice, gildmillet | 15 |
+  | Clover | 25 |
+  | Golden clover | 125 |
+
+  - With the default of 5, baker's wheat and thumbcorn are planted and nothing dearer. **Golden clover needs a limit of 125 or more**, and the chain that unlocks it needs 15. The Garden tab says so in plain words whenever a plant in your layout, or in the chain, is over the limit.
+  - Seeds are priced on your CpS **as it is at that moment**, so nothing is planted while a Frenzy or another CpS buff is running.
+  - A seed is only bought with cookies above the cookie reserve, and never when that would hold up what auto-buy is saving for, unless that is further away than the limit anyway (the same rule as the no-payback upgrades).
+- **What to plant.** For a bakery whose income is clicks and click buffs, measured on such a save:
+
+  | Field of 20 tiles on clay | Effect, averaged over the plants' lives | Typical income |
+  |---|---|---|
+  | Thumbcorn | clicks +42% | x1.42 |
+  | Clover | golden cookies 19% more often | about x1.24 |
+  | Golden clover | golden cookies 46% more often | about x2.4 |
+
+  More golden cookies means more Frenzies and click buffs, and more of them on top of each other, which is why golden clover wins by so much. A golden clover field costs about 16 seconds of CpS per second to keep planted. Nursetulips add under one point and aren't worth a tile.
+- **Seed to unlock** (default golden clover): new seeds come from mutations. An empty tile next to the right mature plants sometimes sprouts a new one, and harvesting that once mature gives you its seed for good, through every ascension.
+  - Pick a seed and AFK Baker works through the **chain** from the seeds you have. For golden clover from baker's wheat that is thumbcorn, cronerice, gildmillet, golden clover.
+  - For each step it plants the parents in the pattern that leaves the most empty tiles next to them, uses **wood chips** (three tries a tick) when you have 300 Farms, keeps those tiles clear, lets each new plant mature, harvests it, and moves on. Seeds that turn up on the way are kept too.
+  - The Garden tab shows the chain, the current step, the chance and a rough time. Golden clover from nothing took 20 to 38 hours of play in tests; the last step is a rare roll (0.07% a try) and can take much longer.
+  - **While a seed is being unlocked the garden gives next to no bonus**: wood chips cut plant effects to a quarter, and the plot is full of parents.
+  - **When the seed is yours, it switches to your layout by itself.** An ascension wipes the plot; the chain carries on from the seeds already unlocked.
+  - Every one of the 33 seeds can be picked. Meddleweed is waited for on a bare plot; brown mold and crumbspore come from uprooting old meddleweeds. "None" skips unlocking and just farms the layout.
+  - **Every roll is the game's own.** Nothing is reloaded, retried or changed; AFK Baker plants, waits and harvests, as you would.
+- The Dashboard shows how many tiles are planted and with what, the soil, the time to the next tick, the unlock step if there is one, and what planting is waiting for.
+- The Stats tab books what harvests pay under "Garden harvests" and what seeds cost under "Garden planting, cost".
 
 **Auto-ascend**
 - The threshold is either **prestige gained this run** or **total prestige level after ascending**. It uses the same numbers as the game's Legacy button.
@@ -329,6 +383,7 @@ The Dashboard shows, for each feature:
 - the Grimoire: magic (current / max), the spell, what the cast is waiting for, and the last cast with its result, e.g. `Cast Force the Hand of Fate: Frenzy`. The result appears once the summoned cookie has been clicked
 - your progress toward the ascend threshold, plus the guard warning (red dot) when it's active
 - with a grandmapocalypse limit set, where research stops and the grandmas' stage now, or your options once they are past it
+- with auto-garden on, the tiles planted, the soil, the next tick, the seed being unlocked, and what planting is waiting for
 - with Auto seasons on, the current season and its time left, what is being collected, what comes next, and any season that is waiting with the reason
 - with Godzamok combos on, the running Devastation or what the next combo is waiting for, and the last combo with its cost
 
