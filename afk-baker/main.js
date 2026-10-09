@@ -64,10 +64,13 @@
 	const SEASON_TOGGLES = { valentines: 'seasonValentines', christmas: 'seasonChristmas', halloween: 'seasonHalloween', easter: 'seasonEaster' };
 	// Where to stay once nothing is left to collect.
 	const HOME_SEASONS = { fools: 'Business Day', none: 'None', christmas: 'Christmas', halloween: 'Halloween', valentines: "Valentine's Day", easter: 'Easter' };
+	// The garden's soils, keyed as in M.soils (minigameGarden.js).
+	const GARDEN_SOILS = { clay: 'Clay', dirt: 'Dirt', fertilizer: 'Fertilizer', pebbles: 'Pebbles', woodchips: 'Wood chips' };
 	// When Force the Hand of Fate is cast, once the magic meter is full.
 	const GRIMOIRE_TIMINGS = { full: 'When magic is full', buff: 'During a Frenzy or click buff', click: 'Only during a click buff' };
 	const CYCLE_OPTIONS = {
 		grimoireTiming: GRIMOIRE_TIMINGS,
+		gardenSoil: GARDEN_SOILS,
 		grandmaLimit: GRANDMA_LIMITS,
 		godzamokMode: GODZAMOK_MODES,
 		homeSeason: HOME_SEASONS,
@@ -209,6 +212,7 @@
 		sunderRate: [1, 30],
 		godzamokCapPercent: [1, 50],
 		seasonRenewMinutes: [0, MAX_DRAGON_TRAIN_MINUTES],
+		gardenLimitMinutes: [0, MAX_DRAGON_TRAIN_MINUTES],
 	};
 	const REINCARNATE_GRACE_MS = 3000;
 	const STATUS_REFRESH_MS = 500;
@@ -247,6 +251,20 @@
 	const SANTA_MAX_LEVEL = 14;
 	// Seconds a wrinkler takes to crawl to the cookie before it feeds (Game.UpdateWrinklers).
 	const WRINKLER_CRAWL_SECONDS = 10;
+	const GARDEN_CHECK_INTERVAL_MS = 1000;
+	// The plot is a 6x6 grid; how much of it is open depends on the Farm's level.
+	const GARDEN_SIZE = 6;
+	// A layout tile holds a plant's key (as in M.plants), '' for nothing, or this: the best plant the
+	// player has a seed for, for a bakery that lives on clicks and golden cookies.
+	const GARDEN_AUTO = 'auto';
+	// Golden clover: golden cookies 3% more often. Thumbcorn: clicks 2% stronger. Baker's wheat: CpS +1%.
+	const GARDEN_BEST = ['goldenClover', 'thumbcorn', 'bakerWheat'];
+	// Plants that pay out when harvested mature (their onHarvest): cookies, or a sugar lump.
+	const GARDEN_HARVEST_PLANTS = ['bakeberry', 'chocoroot', 'whiteChocoroot', 'queenbeet', 'duketater', 'queenbeetLump'];
+	// The Juicy queenbeet: it can't be planted, and is always left to mature for its sugar lump.
+	const GARDEN_LUMP_PLANT = 'queenbeetLump';
+	const GARDEN_SOUND = /^snd\/(tillb\d|harvest\d|toneTick)\.mp3$/;
+	const GARDEN_PRESETS = { best: 'Best I have', thumbcorn: 'All thumbcorn', goldenClover: 'All golden clover', half: 'Half and half', clear: 'Clear' };
 	// Where "wrinkler" turns up on screen: tooltips, the menus, the news ticker, notifications, prompts,
 	// the dragon and Santa panel, and AFK Baker's own panel and tab.
 	const REDFOX_CONTAINERS = ['tooltip', 'menu', 'commentsText', 'notes', 'prompt', 'specialPopup', 'afkPanel', 'afkOpen'];
@@ -265,6 +283,7 @@
 		['market', 'Stock market sales', 'Only the part of a sale the game counts as cookies baked. The market\'s whole effect on your bank is further down.'],
 		['offline', 'While the game was closed', ''],
 		['other', 'Other', 'Everything AFK Baker did not do itself: golden cookies and reindeer you clicked, garden harvests, gifts, sugar blessings. It is what is left of the game\'s "cookies baked" after everything above, so the total always matches the game\'s.'],
+		['garden', 'Garden harvests', 'Cookies from plants AFK Baker harvested: bakeberries, chocoroots, queenbeets, duketaters.'],
 		['sales', 'Building sales', 'Only where a Godzamok combo\'s refund lifted the bank above everything baked this run, which the game then counts as baked.'],
 		['uncounted', 'While AFK Baker was not counting', 'Baked this run before counting started, or while it was switched off.'],
 	];
@@ -272,6 +291,7 @@
 		['withered', 'Withered by wrinklers', 'Taken from production while wrinklers feed. It comes back, with interest, under Wrinklers popped.'],
 		['debuff', 'Lost to Clot and other CpS debuffs', 'How far production fell below your CpS without buffs.'],
 		['ruin', 'Ruin and other bank losses', 'Taken from the bank, not from cookies baked: Ruin from a wrath cookie, a backfired Conjure Baked Goods.'],
+		['planting', 'Garden planting, cost', 'What the seeds AFK Baker planted cost the bank.'],
 		['combo', 'Godzamok combos, cost', 'What selling buildings and buying them back cost the bank. What it bought is under Clicks, extra from click buffs.'],
 	];
 	const INCOME_HISTORY_MAX = 20;
@@ -298,6 +318,7 @@
 		autoPetDragon: 'Auto-pet dragon', autoPantheon: 'Auto-Pantheon', pantheonDiamond: 'Pantheon: Diamond slot', pantheonRuby: 'Pantheon: Ruby slot', pantheonJade: 'Pantheon: Jade slot', godzamokCombo: 'Godzamok combos', godzamokMode: 'Godzamok combos: when', godzamokCapPercent: 'Godzamok combos: limit, % of the bank',
 		autoSeasons: 'Auto seasons', seasonValentines: "Auto seasons: Valentine's Day", seasonChristmas: 'Auto seasons: Christmas', seasonHalloween: 'Auto seasons: Halloween', seasonEaster: 'Auto seasons: Easter',
 		homeSeason: 'Home season', seasonRenewMinutes: 'Home season: renewal limit, minutes of CpS',
+		autoGarden: 'Auto-garden', gardenSoil: 'Garden soil', gardenLimitMinutes: 'Garden: planting limit, minutes of CpS', gardenLayout: 'Garden layout',
 		redFox: 'RedFox', sunder: 'Sunder', sunderRate: 'Sunder: pets per second', autoTrade: 'Auto-trade stocks', marketStrategy: 'Stock strategy', marketBuyPercent: 'Buy at % of resting value',
 		marketSellPercent: 'Sell at % of resting value', marketBankPercent: '% of the bank the market may use', marketSellAtLoss: 'Sell at a loss',
 		autoBrokers: 'Hire brokers', autoOffice: 'Upgrade office', officeMinutes: 'Office upgrade limit, minutes of CpS', autoCast: 'Auto-cast spell',
@@ -349,6 +370,9 @@
 		seasonEaster: true,
 		homeSeason: 'fools',
 		seasonRenewMinutes: 30,
+		autoGarden: false,
+		gardenSoil: 'clay',
+		gardenLimitMinutes: 5,
 		autoTrade: false,
 		marketStrategy: 'restingGuide',
 		marketBuyPercent: 30,
@@ -431,6 +455,14 @@
 		return basis;
 	}
 
+	// The garden layout: one entry per tile of the full 6x6 grid, row by row. Each is a plant key, '' or
+	// 'auto'. Keys are checked against the garden when it is there; here only their form.
+	function sanitizeGardenLayout(raw) {
+		const tiles = GARDEN_SIZE * GARDEN_SIZE;
+		if (!Array.isArray(raw) || raw.length !== tiles) return Array(tiles).fill(GARDEN_AUTO);
+		return raw.map(function (key) { return typeof key === 'string' && /^[A-Za-z]{0,20}$/.test(key) ? key : ''; });
+	}
+
 	// The player's own rating colors: { rating: '#rrggbb' } for the ratings that were changed.
 	function sanitizeColors(raw) {
 		const colors = {};
@@ -448,6 +480,7 @@
 		// null until the player chooses: on, unless Cookie Monster is drawing its own store colors.
 		settings.storeOverlay = raw && typeof raw.storeOverlay === 'boolean' ? raw.storeOverlay : null;
 		settings.overlayColors = sanitizeColors(raw && raw.overlayColors);
+		settings.gardenLayout = sanitizeGardenLayout(raw && raw.gardenLayout);
 		// God keys are checked against the Pantheon when it is there; here only their form, and no god twice.
 		const seenGods = {};
 		for (const key of PANTHEON_SLOT_KEYS) {
@@ -609,6 +642,10 @@
 		nextSeasonCheckAt: 0,
 		lastSeasonAction: '',
 		seasonsSignature: '',
+		nextGardenCheckAt: 0,
+		lastGardenAction: '',
+		gardenBrush: GARDEN_AUTO, // what a click on a tile of the layout puts there
+		gardenSignature: '',
 		nextComboCheckAt: 0,
 		comboCount: 0,
 		comboLast: '',
@@ -789,6 +826,7 @@
 			runGrimoire(now);
 			runPantheon(now);
 			runSeasons(now);
+			runGarden(now);
 			checkAutoAscend();
 			refreshStatusLine(now);
 		} catch (e) {
@@ -3805,6 +3843,220 @@
 	}
 
 	/* =====================================================================
+	   GARDEN
+	   Keeps a layout planted: a plant per tile and a soil, chosen by the player. It plants what is
+	   missing, replants what dies, uproots what doesn't belong, and harvests the plants that pay when
+	   mature. It reads what the garden shows: the plot, each plant's growth bar, the seeds owned, the
+	   soil and its cooldown, prices. The game wipes the plot on ascending; the layout is planted again.
+	   ===================================================================== */
+
+	function garden() {
+		const farm = Game.Objects['Farm'];
+		return Game.ascensionMode !== 1 && Game.isMinigameReady(farm) ? farm.minigame : null;
+	}
+
+	// The best plant the player has a seed for and whose seed costs no more than the planting limit, or ''.
+	function gardenBest(M) {
+		const limit = settings().gardenLimitMinutes * (1 + 1e-9);
+		for (const key of GARDEN_BEST) {
+			if (M.plants[key] && M.plants[key].unlocked && plantMinutes(M, M.plants[key]) <= limit) return key;
+		}
+		return '';
+	}
+
+	// A better plant than the one "best I have" settled on, that the limit is keeping out. null if none.
+	function gardenBetter(M) {
+		const best = gardenBest(M);
+		for (const key of GARDEN_BEST) {
+			if (key === best) return null;
+			if (M.plants[key] && M.plants[key].unlocked) return M.plants[key];
+		}
+		return null;
+	}
+
+	// What the garden should be doing: the plant wanted on every tile of the grid ('' for none) and the soil.
+	function gardenGoal(M) {
+		const s = settings();
+		const best = gardenBest(M);
+		return {
+			mode: 'farm',
+			soil: s.gardenSoil,
+			wants: s.gardenLayout.map(function (key) { return key === GARDEN_AUTO ? best : hasKey(M.plants, key) ? key : ''; }),
+		};
+	}
+
+	// A CpS buff on screen: plants are priced on CpS as it is now, so a Frenzy makes them 7 times dearer.
+	function hasCpsBoost() {
+		for (const name in Game.buffs) {
+			if (typeof Game.buffs[name].multCpS === 'number' && Game.buffs[name].multCpS > 1) return true;
+		}
+		return false;
+	}
+
+	function plantMinutes(M, plant) {
+		return Game.unbuffedCps > 0 ? M.getCost(plant) / Game.unbuffedCps / 60 : Infinity;
+	}
+
+	// Why a seed can't go in the ground right now, or ''. `spare` is the bank above the cookie reserve,
+	// less what this pass has already spent.
+	function plantHold(M, plant, spare) {
+		const s = settings();
+		if (!plant.unlocked) return `the ${plant.name} seed, which you don't have yet`;
+		if (!plant.plantable) return `${plant.name}, which can't be planted`;
+		if (hasCpsBoost()) return 'the CpS buff to end (seeds are priced on buffed CpS)';
+		const cost = M.getCost(plant);
+		const minutes = plantMinutes(M, plant);
+		// A seed's price is a fixed number of minutes of CpS (thumbcorn 5, golden clover 125), so the
+		// limit decides which plants may be planted at all. A price right at the limit counts as under it.
+		if (minutes > s.gardenLimitMinutes * (1 + 1e-9)) return `a higher limit: ${plant.name} costs ${Beautify(Math.ceil(minutes - 1e-9))} min of CpS, over your ${s.gardenLimitMinutes}`;
+		if (cost > spare) return `${Beautify(cost - spare)} more cookies`;
+		// The same rule as the no-payback upgrades: never hold up what auto-buy is saving for, unless that
+		// is further off than the limit anyway.
+		const target = s.autoBuy ? state.buyTarget : null;
+		if (target && spare - cost < target.cost) {
+			const wait = Game.unbuffedCps > 0 ? Math.max(target.cost - spare, 0) / Game.unbuffedCps : Infinity;
+			if (!(wait > s.gardenLimitMinutes * 60)) return `auto-buy, which is saving for ${target.label}`;
+		}
+		return '';
+	}
+
+	// What to do on the plot right now: tiles to harvest and to plant, and what the rest is waiting for.
+	function gardenPlan(M) {
+		const goal = gardenGoal(M);
+		const plan = { goal: goal, harvest: [], plant: [], waiting: {}, wanted: 0, planted: 0, growing: [], names: {} };
+		let spare = Game.cookies - reserveAmount();
+		for (let y = 0; y < GARDEN_SIZE; y++) {
+			for (let x = 0; x < GARDEN_SIZE; x++) {
+				if (!M.isTileUnlocked(x, y)) continue;
+				const want = goal.wants[y * GARDEN_SIZE + x];
+				const tile = M.plot[y][x];
+				const plant = tile[0] > 0 ? M.plantsById[tile[0] - 1] : null;
+				if (want) plan.wanted++;
+				if (plant) {
+					const mature = tile[1] >= plant.mature;
+					if (!plant.unlocked || plant.key === GARDEN_LUMP_PLANT) {
+						// A plant whose seed the player doesn't have is left to mature: harvesting it then gives
+						// the seed. A Juicy queenbeet gives its sugar lump the same way.
+						if (mature) plan.harvest.push({ x: x, y: y, plant: plant, why: plant.unlocked ? 'for its sugar lump' : 'for its seed' });
+						else if (plan.growing.indexOf(plant.name) === -1) plan.growing.push(plant.name);
+					} else if (plant.key !== want) {
+						// Weeds and fungi go at once. Another plant only makes way when the tile is to stay
+						// empty or its own plant can go in now: a growing plant beats a bare tile.
+						if (plant.weed || plant.fungus || !want || !plantHold(M, M.plants[want], spare)) plan.harvest.push({ x: x, y: y, plant: plant, why: 'not in the layout' });
+						else plan.misplaced = (plan.misplaced || 0) + 1;
+					} else {
+						plan.planted++;
+						plan.names[plant.name] = (plan.names[plant.name] || 0) + 1;
+						if (mature && GARDEN_HARVEST_PLANTS.indexOf(plant.key) !== -1) plan.harvest.push({ x: x, y: y, plant: plant, why: 'mature' });
+					}
+					continue;
+				}
+				if (!want) continue;
+				const seed = M.plants[want];
+				const hold = plantHold(M, seed, spare);
+				if (hold) {
+					plan.waiting[hold] = (plan.waiting[hold] || 0) + 1;
+				} else {
+					plan.plant.push({ x: x, y: y, plant: seed });
+					spare -= M.getCost(seed);
+				}
+			}
+		}
+		return plan;
+	}
+
+	// Presses the game's own soil button, which checks the cooldown and the Farm count itself.
+	function setGardenSoil(M, key) {
+		const soil = M.soils[key];
+		if (!soil || M.soil === soil.id || M.parent.amount < soil.req || Date.now() < M.nextSoil) return;
+		const button = document.getElementById('gardenSoil-' + soil.id);
+		if (!button) return;
+		withSoundsMuted(GARDEN_SOUND, function () { button.dispatchEvent(new MouseEvent('click', { bubbles: false })); });
+		if (M.soil === soil.id) {
+			state.lastGardenAction = `changed the soil to ${soil.name}`;
+			debugLog('Garden:', state.lastGardenAction);
+		}
+	}
+
+	// What the soil is waiting for, or ''.
+	function soilHold(M, key) {
+		const soil = M.soils[key];
+		if (!soil || M.soil === soil.id) return '';
+		if (M.parent.amount < soil.req) return `${soil.req} Farms, for ${soil.name}`;
+		if (Date.now() < M.nextSoil) return `the soil's cooldown (${formatDuration(M.nextSoil - Date.now())}), for ${soil.name}`;
+		return '';
+	}
+
+	function runGarden(now) {
+		const s = settings();
+		if (!s.autoGarden || now < state.nextGardenCheckAt) return;
+		state.nextGardenCheckAt = now + GARDEN_CHECK_INTERVAL_MS;
+		const M = garden();
+		// A frozen garden is the player's pause; nothing is touched. Nothing is spent with an ascension coming.
+		if (!M || M.freeze || state.ascendPending || state.ascendTriggered) return;
+		const plan = gardenPlan(M);
+		setGardenSoil(M, plan.goal.soil);
+		let changed = false;
+		for (const item of plan.harvest) {
+			const gave = item.plant.unlocked ? '' : `, which gave its seed`;
+			const done = countIncome('garden', function () { return M.harvest(item.x, item.y); });
+			if (!done) continue;
+			changed = true;
+			state.lastGardenAction = `harvested ${item.plant.name} (${item.why})${item.plant.unlocked ? gave : ''}`;
+			debugLog('Garden:', state.lastGardenAction);
+		}
+		let planted = 0;
+		let name = '';
+		for (const item of plan.plant) {
+			if (M.plot[item.y][item.x][0] > 0) continue;
+			const cost = M.getCost(item.plant);
+			// M.useTool is what a click on a tile runs: it spends the seed's price and plants it.
+			const savedSparkle = Game.SparkleAt;
+			Game.SparkleAt = function () {};
+			let done = false;
+			try {
+				done = withSoundsMuted(GARDEN_SOUND, function () { return M.useTool(item.plant.id, item.x, item.y); });
+			} finally {
+				Game.SparkleAt = savedSparkle;
+			}
+			if (!done) continue;
+			planted++;
+			name = item.plant.name;
+			if (tracker.earned !== null) addIncome(mod.income.run.losses, 'planting', cost);
+		}
+		if (planted) {
+			changed = true;
+			M.toCompute = true;
+			state.lastGardenAction = `planted ${planted === 1 ? name : planted + ' seeds'}`;
+			debugLog('Garden:', state.lastGardenAction);
+		}
+		// The plants on the plot change CpS, so a purchase waiting to be checked can no longer be.
+		if (changed) noteGameChanged();
+	}
+
+	function gardenRow() {
+		const s = settings();
+		const row = { tab: 'garden', name: 'Garden', dot: 'on', now: '', wait: '' };
+		if (!s.autoGarden) return Object.assign(row, { dot: 'off', now: 'Auto-garden off.' });
+		const M = garden();
+		if (!M) return Object.assign(row, { dot: 'wait', now: 'No garden yet.', wait: Game.ascensionMode === 1 ? 'the end of the Born again run' : 'a Farm level (bought with a sugar lump)' });
+		if (M.freeze) return Object.assign(row, { dot: 'wait', now: 'The garden is frozen, so nothing is planted or harvested.', wait: 'you to unfreeze it' });
+		const plan = gardenPlan(M);
+		const names = Object.keys(plan.names).map(function (name) { return `${plan.names[name]} ${name}`; }).join(', ');
+		row.now = (plan.goal.note ? plan.goal.note + ' ' : '') + `${plan.planted} of ${plan.wanted} tiles planted${names ? ' (' + names + ')' : ''}. Soil: ${M.soilsById[M.soil].name}. Next tick in ${formatDuration(Math.max(0, M.nextStep - Date.now()))}.`;
+		if (plan.misplaced) row.now += ` ${plan.misplaced} tile${plan.misplaced === 1 ? ' keeps' : 's keep'} another plant until the layout's can be planted.`;
+		if (plan.growing.length) row.now += ` Letting ${plan.growing.join(', ')} mature for the seed.`;
+		if (state.lastGardenAction) row.now += ` Last: ${state.lastGardenAction}.`;
+		const waits = Object.keys(plan.waiting).map(function (reason) { return `${reason} (${plan.waiting[reason]} tile${plan.waiting[reason] === 1 ? '' : 's'})`; });
+		const soil = soilHold(M, plan.goal.soil);
+		if (soil) waits.push(soil);
+		if (plan.goal.wait) waits.push(plan.goal.wait);
+		row.wait = waits.join('; ');
+		if (row.wait) row.dot = 'wait';
+		return row;
+	}
+
+	/* =====================================================================
 	   GODZAMOK COMBOS
 	   With Godzamok slotted, selling buildings gives Devastation: +1% click power per building sold
 	   (Diamond slot; half that in Ruby, a quarter in Jade) for 10 seconds. A combo sells whole building
@@ -4661,6 +4913,17 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 #afkPanel .afk-stats td.afk-stats-live{color:#fff;}
 #afkPanel .afk-stats tr.afk-stats-section td{padding-top:10px;font-size:10px;text-transform:uppercase;letter-spacing:0.4px;color:rgba(255,255,255,0.6);border-bottom:1px solid rgba(255,255,255,0.25);}
 #afkPanel .afk-seasons th,#afkPanel .afk-seasons td{text-align:left;}
+#afkPanel .afk-plant{width:48px;height:48px;pointer-events:none;}
+#afkPanel .afk-brushes{display:flex;flex-wrap:wrap;align-items:center;padding:4px 14px;}
+#afkPanel .afk-brush{margin:2px 4px 2px 0px;cursor:pointer;}
+#afkPanel .afk-brush-plant{display:inline-block;width:48px;height:48px;border:1px solid rgba(255,255,255,0.15);border-radius:4px;}
+#afkPanel .afk-brush.afk-selected{border-color:#ece2b6;box-shadow:0px 0px 0px 1px #ece2b6;background-color:rgba(255,255,255,0.08);}
+#afkPanel .afk-garden-grid{display:grid;grid-template-columns:repeat(6,50px);grid-gap:2px;margin:6px 14px 8px;}
+#afkPanel .afk-gtile{position:relative;width:48px;height:48px;border:1px solid rgba(255,255,255,0.25);border-radius:3px;background:rgba(80,55,30,0.55);cursor:pointer;}
+#afkPanel .afk-gtile:hover{border-color:#fff;}
+#afkPanel .afk-gtile-closed{opacity:0.35;}
+#afkPanel .afk-gtile-locked .afk-plant{filter:grayscale(100%);opacity:0.5;}
+#afkPanel .afk-gtile-auto{position:absolute;left:0px;right:0px;bottom:0px;text-align:center;font-size:9px;line-height:11px;color:#fff;text-shadow:0px 0px 2px #000,0px 1px 1px #000;pointer-events:none;}
 #afkPanel .afk-seasons td.afk-seasons-missing{white-space:normal;min-width:120px;max-width:260px;}
 #tooltip .afk-tip{margin:0px 8px 8px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.2);font-size:11px;text-align:left;position:relative;}
 #tooltip .afk-tip-who{font-size:9px;text-transform:uppercase;letter-spacing:0.5px;opacity:0.55;}
@@ -5048,7 +5311,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 	// AFK Baker's own tabs, in order. Tabs registered by add-ons come after them.
 	const TABS = [
 		['dashboard', 'Dashboard'], ['clickers', 'Clickers'], ['autobuy', 'Auto-buy'], ['lumps', 'Sugar lumps'], ['dragon', 'Dragon'], ['pantheon', 'Pantheon'],
-		['market', 'Stock Market'], ['grimoire', 'Grimoire'], ['ascend', 'Auto-ascend'], ['seasons', 'Seasons'], ['stats', 'Stats'], ['other', 'Other'],
+		['market', 'Stock Market'], ['grimoire', 'Grimoire'], ['garden', 'Garden'], ['ascend', 'Auto-ascend'], ['seasons', 'Seasons'], ['stats', 'Stats'], ['other', 'Other'],
 	];
 
 	// A "?" that shows an explanation in the game's own tooltip when hovered.
@@ -5738,9 +6001,97 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		if (seasonsSignature(seasonPlan()) !== state.seasonsSignature) renderMenuSection();
 	}
 
+	/* ----- Garden tab ----- */
+
+	function applyGardenPreset(preset) {
+		const s = settings();
+		s.gardenLayout = s.gardenLayout.map(function (tile, i) {
+			if (preset === 'best') return GARDEN_AUTO;
+			if (preset === 'half') return (i % GARDEN_SIZE) % 2 === 0 ? 'thumbcorn' : 'goldenClover';
+			return preset === 'clear' ? '' : preset;
+		});
+	}
+
+	// A plant's picture from the game's own sprite sheet (loaded from the game at run time): its mature stage.
+	function plantIconHtml(plant, extraClass) {
+		return `<div class="afk-plant${extraClass || ''}" style="background-image:url(${Game.resPath}img/gardenPlants.png?v=${Game.version});background-position:${-4 * 48}px ${-plant.icon * 48}px;"></div>`;
+	}
+
+	function plantTip(M, plant, extra) {
+		const minutes = plantMinutes(M, plant);
+		const html = '<div style="padding:8px;width:280px;font-size:11px;line-height:1.35;">' +
+			`<div class="name">${plant.name}</div>${extra ? '<div>' + extra + '</div>' : ''}<div class="line"></div>${plant.effsStr || ''}` +
+			`<div class="line"></div>A seed costs ${Number.isFinite(minutes) ? Beautify(Math.ceil(minutes - 1e-9)) : '?'} min of CpS.</div>`;
+		return Game.getTooltip(html, 'this');
+	}
+
+	function gardenLayoutHtml(M) {
+		const s = settings();
+		const best = gardenBest(M);
+		const brushes = [[GARDEN_AUTO, 'Best I have'], ['', 'Empty']].map(function (brush) {
+			return `<a class="smallFancyButton option afk-brush${state.gardenBrush === brush[0] ? ' afk-selected' : ''}" data-afk-brush="${brush[0]}">${brush[1]}</a>`;
+		}).join('') + M.plantsById.filter(function (plant) { return plant.unlocked && plant.plantable; }).map(function (plant) {
+			return `<span class="afk-brush afk-brush-plant${state.gardenBrush === plant.key ? ' afk-selected' : ''}" data-afk-brush="${plant.key}" ${plantTip(M, plant)}>${plantIconHtml(plant)}</span>`;
+		}).join('');
+		let grid = '';
+		for (let y = 0; y < GARDEN_SIZE; y++) {
+			for (let x = 0; x < GARDEN_SIZE; x++) {
+				const i = y * GARDEN_SIZE + x;
+				const entry = s.gardenLayout[i];
+				const key = entry === GARDEN_AUTO ? best : entry;
+				const plant = hasKey(M.plants, key) ? M.plants[key] : null;
+				const open = M.isTileUnlocked(x, y);
+				const note = entry === GARDEN_AUTO ? 'The best plant you have a seed for.' : plant && !plant.unlocked ? "You don't have this seed yet." : '';
+				grid += `<div class="afk-gtile${open ? '' : ' afk-gtile-closed'}${plant && !plant.unlocked ? ' afk-gtile-locked' : ''}" data-afk-gtile="${i}" ${plant ? plantTip(M, plant, note) : ''}>` +
+					(plant ? plantIconHtml(plant) : '') + (entry === GARDEN_AUTO ? '<span class="afk-gtile-auto">auto</span>' : '') + '</div>';
+			}
+		}
+		return listing('<label>Pick a plant, then click tiles to put it there. Tiles outside your plot are dimmed: they are used once the Farm\'s level opens them.</label>') +
+			`<div class="afk-brushes">${brushes}</div><div class="afk-garden-grid">${grid}</div>` +
+			listing('<label>Presets:</label> ' + Object.keys(GARDEN_PRESETS).map(function (key) { return actionButton('garden-preset-' + key, GARDEN_PRESETS[key]); }).join(''));
+	}
+
+	// What the tab shows that moves on its own: when it changes, the tab is drawn again.
+	function gardenSignature(M) {
+		return M ? JSON.stringify([M.plantsById.map(function (plant) { return plant.unlocked ? 1 : 0; }).join(''), M.parent.level, gardenGoal(M).mode, gardenGoal(M).step || '', gardenBest(M)]) : 'none';
+	}
+
+	function gardenTabHtml() {
+		const s = settings();
+		const M = garden();
+		state.gardenSignature = gardenSignature(M);
+		let html = listing(toggleButton('autoGarden', 'Auto-garden') +
+			hint('Keeps your layout planted. It plants the tiles that are empty, replants what dies of old age, uproots weeds and anything else that is not in the layout, and harvests the plants that pay when mature (bakeberry, chocoroot, queenbeet, duketater) and Juicy queenbeets for their sugar lump. A plant whose seed you do not have is left to mature and then harvested, which gives you the seed. Everything else is left to live out its life: a plant\'s effect is strongest once mature. The game wipes the plot and puts the soil back to dirt when you ascend; the layout is planted again each run. It never freezes the garden, does nothing while you have frozen it, and never spends sugar lumps.'));
+		if (!M) return html + listing(`<label>The garden isn't available: ${Game.ascensionMode === 1 ? "it doesn't run in a Born again run" : 'it unlocks when a Farm has a level (bought with a sugar lump)'}.</label>`);
+		if (!s.autoGarden) return html + gardenLayoutHtml(M);
+		const over = [];
+		gardenGoal(M).wants.forEach(function (key) {
+			const plant = key ? M.plants[key] : null;
+			if (plant && plantMinutes(M, plant) > s.gardenLimitMinutes * (1 + 1e-9) && over.indexOf(plant) === -1) over.push(plant);
+		});
+		html += listing(cycleButton('gardenSoil', 'Soil') +
+				hint('Clay makes plant effects 25% stronger and ticks every 15 minutes, so plants also live three times as long: the soil for a layout you want to keep. Dirt ticks every 5 minutes. Fertilizer ticks every 3 minutes with effects at 75%. Pebbles and wood chips cut effects to 25%. Fertilizer needs 50 Farms, clay 100, pebbles 200, wood chips 300, and the soil can be changed once every 10 minutes; AFK Baker changes it as soon as the game allows.')) +
+			listing(`<label>Plant a seed when it costs</label> ${numberInput('gardenLimitMinutes', 50)}<label>minutes of CpS or less</label>` +
+				hint('A seed\'s price is a fixed number of minutes of your CpS: baker\'s wheat 1, thumbcorn 5, cronerice and gildmillet 15, clover 25, golden clover 125. So this limit decides which plants AFK Baker will plant at all. Seeds are priced on your CpS as it is at that moment, so nothing is planted while a Frenzy or another CpS buff is running. A seed is only bought with cookies above your cookie reserve, and never when that would hold up what auto-buy is saving for, unless that is further away than this limit anyway.'));
+		if (over.length) {
+			html += listing(`<label style="color:#fc9;">Over the limit, so not planted: ${over.map(function (plant) { return `${escapeHtml(plant.name)} (${Beautify(Math.ceil(plantMinutes(M, plant) - 1e-9))} min of CpS a seed)`; }).join(', ')}. Raise the limit to plant ${over.length === 1 ? 'it' : 'them'}.</label>`);
+		}
+		const better = gardenBetter(M);
+		if (better && s.gardenLayout.indexOf(GARDEN_AUTO) !== -1) {
+			html += listing(`<label style="color:#fc9;">"Best I have" is using ${gardenBest(M) ? escapeHtml(M.plants[gardenBest(M)].name) : 'nothing'}: you have the ${escapeHtml(better.name)} seed, but it costs ${Beautify(Math.ceil(plantMinutes(M, better) - 1e-9))} min of CpS, over the limit.</label>`);
+		}
+		return html + (typeof gardenUnlockHtml === 'function' ? gardenUnlockHtml(M) : '') + heading('Layout') + gardenLayoutHtml(M);
+	}
+
+	function updateGardenTab() {
+		const focused = document.activeElement;
+		if (focused && (focused.tagName === 'INPUT' || focused.tagName === 'SELECT' || focused.tagName === 'TEXTAREA')) return;
+		if (gardenSignature(garden()) !== state.gardenSignature) renderMenuSection();
+	}
+
 	const TAB_HTML = {
 		clickers: clickersTabHtml, autobuy: autobuyTabHtml, lumps: lumpsTabHtml, dragon: dragonTabHtml,
-		pantheon: pantheonTabHtml, market: marketTabHtml, grimoire: grimoireTabHtml, ascend: ascendTabHtml, seasons: seasonsTabHtml, stats: statsTabHtml, other: otherTabHtml,
+		pantheon: pantheonTabHtml, market: marketTabHtml, grimoire: grimoireTabHtml, garden: gardenTabHtml, ascend: ascendTabHtml, seasons: seasonsTabHtml, stats: statsTabHtml, other: otherTabHtml,
 	};
 
 	/* ----- The dashboard: one row per feature ----- */
@@ -5918,7 +6269,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		const grandmas = grandmaRow();
 		const godzamok = godzamokRow();
 		let rows = [clickerRow(), wrinklerRow(), autoBuyRow()].concat(grandmas ? [grandmas] : [], [reserveRow(), lumpRow()])
-			.concat(dragonRows(), [pantheonRow()], godzamok ? [godzamok] : [], marketRows(), [grimoireRow(), seasonsRow(), ascendRow()]);
+			.concat(dragonRows(), [pantheonRow()], godzamok ? [godzamok] : [], marketRows(), [grimoireRow(), gardenRow(), seasonsRow(), ascendRow()]);
 		rows = rows.concat(extrasRows());
 		ext.tabs.forEach(function (tab) {
 			const row = addOnRow(tab);
@@ -5993,6 +6344,11 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		if (value === null) return 'automatic';
 		if (hasKey(CYCLE_OPTIONS, key)) return CYCLE_OPTIONS[key][value];
 		if (key === 'overlayColors') return Object.keys(value).length ? Object.keys(value).map(function (rating) { return `${RATINGS[rating].label} ${value[rating]}`; }).join(', ') : 'default';
+		if (key === 'gardenLayout') {
+			const counts = {};
+			value.forEach(function (tile) { const name = tile === GARDEN_AUTO ? 'best I have' : tile || 'empty'; counts[name] = (counts[name] || 0) + 1; });
+			return Object.keys(counts).map(function (name) { return `${counts[name]} ${name}`; }).join(', ');
+		}
 		if (key === 'lumpPriority') return value.length ? value.map(function (entry) { return `${entry.building} to ${entry.level}`; }).join(', ') : 'empty';
 		if (value === '') return 'none';
 		return typeof value === 'number' ? Beautify(value) : String(value);
@@ -6210,11 +6566,17 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 	}
 
 	function onMenuClick(event) {
-		const target = event.target.closest('[data-afk-toggle],[data-afk-cycle],[data-afk-lump],[data-afk-tab],[data-afk-action],[data-afk-go],[data-afk-aura-slot],[data-afk-aura],[data-afk-pslot-clear],[data-afk-god],[data-afk-pslot]');
+		const target = event.target.closest('[data-afk-toggle],[data-afk-cycle],[data-afk-lump],[data-afk-tab],[data-afk-action],[data-afk-go],[data-afk-aura-slot],[data-afk-aura],[data-afk-pslot-clear],[data-afk-god],[data-afk-pslot],[data-afk-brush],[data-afk-gtile]');
 		if (!target) return;
 		const s = settings();
 		const data = target.dataset;
-		if (data.afkAuraSlot) {
+		if (data.afkBrush !== undefined) {
+			state.gardenBrush = data.afkBrush;
+		} else if (data.afkGtile !== undefined) {
+			const tile = Number(data.afkGtile);
+			if (!(tile >= 0 && tile < s.gardenLayout.length)) return;
+			s.gardenLayout[tile] = state.gardenBrush;
+		} else if (data.afkAuraSlot) {
 			state.auraSlot = state.auraSlot === data.afkAuraSlot ? '' : data.afkAuraSlot;
 		} else if (data.afkAura !== undefined) {
 			if (!state.auraSlot || !pickAura(state.auraSlot, Number(data.afkAura))) return;
@@ -6247,6 +6609,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 			else if (action === 'import-check') checkImport();
 			else if (action === 'import-apply') applyImport();
 			else if (action === 'import-cancel') state.importDraft = { text: '', preview: null, error: '' };
+			else if (action.indexOf('garden-preset-') === 0) applyGardenPreset(action.slice('garden-preset-'.length));
 			else if (action === 'stats-clear') {
 				if (state.statsClearArmed) mod.income.history = [];
 				state.statsClearArmed = !state.statsClearArmed;
@@ -6619,6 +6982,7 @@ body.afk-dragging,body.afk-dragging *{cursor:grabbing !important;}
 		if (state.panelTab === 'lumps') updateLumpList();
 		if (state.panelTab === 'stats') updateStatsTab();
 		if (state.panelTab === 'seasons') updateSeasonsTab();
+		if (state.panelTab === 'garden') updateGardenTab();
 		// The aura lists show which auras are locked; redraw them when the dragon levels up, unless one is open.
 		if (state.panelTab === 'dragon' && Game.dragonLevel !== state.renderedDragonLevel) {
 			const focused = document.activeElement;
